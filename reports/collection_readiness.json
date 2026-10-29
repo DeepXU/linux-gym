@@ -1,0 +1,57 @@
+{
+  "readyForFormalCollection": false,
+  "decision": "NOT READY",
+  "protocolVersion": "V5.0.0",
+  "timestamp": "2026-10-29T13:41:09.945Z",
+  "checks": [
+    {
+      "id": "CHK-01",
+      "name": "All 8 Tasks Have Non-Disclosing Student Task Instructions",
+      "category": "automated_offline",
+      "status": "PASS",
+      "detail": "All 8 tasks define studentTask, goal, context, successEvidence, howToWork, and constraints with 0 leaked flags or hidden filenames."
+    },
+    {
+      "id": "CHK-02",
+      "name": "Evidence-Grounded Socratic Probing & Non-Disclosure",
+      "category": "automated_offline",
+      "status": "PASS",
+      "detail": "Plain 'ls' triggers documentation_probe without revealing 'ls -a' or '.hidden_flag'."
+    },
+    {
+      "id": "CHK-03",
+      "name": "Reserved ask-ai Command Parser & Shell Interception",
+      "category": "automated_offline",
+      "status": "PASS",
+      "detail": "ask-ai commands are intercepted before Bash execution and routed exclusively to TutorOrchestrator."
+    },
+    {
+      "id": "CHK-04",
+      "name": "Model Role Validation (Embedding Blocked & Classifier Labeled)",
+      "category": "automated_offline",
+      "status": "PASS",
+      "detail": "nomic-embed-text is rejected as tutor/guard; llama3.1:8b is accurately labeled as prompted_classifier."
+    },
+    {
+      "id": "CHK-05",
+      "name": "Docker Daemon & linux-tutor-sandbox:latest Image",
+      "category": "live_infrastructure",
+      "status": "NOT VERIFIED",
+      "detail": "Docker daemon or linux-tutor-sandbox:latest not running in current host environment (profile: cloud_demo). Must be verified on target Ubuntu VM before formal collection."
+    },
+    {
+      "id": "CHK-06",
+      "name": "Live Local Ollama Reachability (http://127.0.0.1:11434)",
+      "category": "live_infrastructure",
+      "status": "NOT VERIFIED",
+      "detail": "Ollama service at http://127.0.0.1:11434 is not reachable in this container. Must be verified on target Ubuntu VM before formal collection."
+    },
+    {
+      "id": "CHK-07",
+      "name": "Dataset Cleanliness & Classification Separation",
+      "category": "automated_offline",
+      "status": "PASS",
+      "detail": "Database contains 0 development test executions."
+    }
+  ]
+}

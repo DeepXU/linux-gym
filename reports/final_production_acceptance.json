@@ -1,0 +1,134 @@
+{
+  "reportVersion": "5.0.0",
+  "applicationName": "Socratic Shell — Guided AI Linux & Cybersecurity Tutor",
+  "generatedAt": "2026-10-29T13:24:00.000Z",
+  "environment": "AI Studio Hosted Linux Container (Pre-Ubuntu Deployment Acceptance)",
+  "finalDecision": "NOT READY",
+  "finalDecisionReason": "Mandatory Honesty Rule enforced: All 18 automated test suites, 8-task dual provisioning, 16-stage end-to-end architecture pipeline, 15-table research export, and Python analysis self-test pass 100%, but live Docker daemon execution (linux-tutor-sandbox:latest) and live local GPU Ollama inference (qwen3-coder:30b / llama3.1:8b) cannot be executed inside the hosted AI Studio container and must be verified on the target Ubuntu server before formal data collection.",
+  "architecturePipeline16Stages": [
+    {
+      "stage": 1,
+      "name": "Frontend login",
+      "component": "components/Login.tsx + services/authService.ts (POST /api/auth/login)",
+      "status": "PASS - executed against real component"
+    },
+    {
+      "stage": 2,
+      "name": "Authenticated API and WebSocket",
+      "component": "server/authMiddleware.ts + server.ts (Bearer token + /pty verifyWebSocketAuthorization)",
+      "status": "PASS - executed against real component"
+    },
+    {
+      "stage": 3,
+      "name": "Real Docker PTY",
+      "component": "Dockerfile.sandbox + server/sandboxProvider.ts + server.ts (/pty WebSocket)",
+      "status": "NOT VERIFIED - requires Ubuntu server",
+      "localFallbackStatus": "PASS - executed against real component (real Linux Bash PTY via util-linux script with [tmux:0:bash*] <username>@socratic-shell:~$ prompt)"
+    },
+    {
+      "stage": 4,
+      "name": "Task provisioning",
+      "component": "server/sandboxProvider.ts (buildRootProvisioningScript + getProvisioningScript for Tasks 1-8)",
+      "status": "PASS - executed against real component"
+    },
+    {
+      "stage": 5,
+      "name": "Command/output capture",
+      "component": "server/sandboxProvider.ts (OSC 777 __gym_log_cmd + parseAndStripOscCommands + recordShellCommand + recordTerminalOutput)",
+      "status": "PASS - executed against real component"
+    },
+    {
+      "stage": 6,
+      "name": "ask-ai interception",
+      "component": "components/XTermTerminal.tsx + server.ts + server/sandboxProvider.ts (intercepted before Bash execution; never recorded as shell_command)",
+      "status": "PASS - executed against real component"
+    },
+    {
+      "stage": 7,
+      "name": "Bounded task-scoped context",
+      "component": "server/socraticTutorEngine.ts (buildCuratedContextSnapshot: <=20 commands, <=10 outputs, secret scrubbing, untrusted tags, SHA-256 contextHash)",
+      "status": "PASS - executed against real component"
+    },
+    {
+      "stage": 8,
+      "name": "Input guard",
+      "component": "server/guardrails.ts + server/llamaGuard.ts (deterministic pre-guard + Llama Guard / prompted classifier input check)",
+      "status": "PASS - executed against real component"
+    },
+    {
+      "stage": 9,
+      "name": "Live Ollama tutor",
+      "component": "server/tutorOrchestrator.ts (callOllamaChat -> http://127.0.0.1:11434/api/chat)",
+      "status": "NOT VERIFIED - requires Ubuntu server",
+      "deterministicStubStatus": "PASS - deterministic mock only (offline_unit_test mode in hosted container; fails closed in locked FORMAL_CAPABILITY)"
+    },
+    {
+      "stage": 10,
+      "name": "Output guard",
+      "component": "server/guardrails.ts + server/llamaGuard.ts + server/socraticTutorEngine.ts (flag/filename/copy-paste solution scrubbing + Socratic single-question check)",
+      "status": "PASS - executed against real component"
+    },
+    {
+      "stage": 11,
+      "name": "Released terminal response",
+      "component": "server/tutorOrchestrator.ts + components/XTermTerminal.tsx (tutor_response_released event + inline ANSI terminal display)",
+      "status": "PASS - executed against real component"
+    },
+    {
+      "stage": 12,
+      "name": "Task verifier",
+      "component": "server/guardrails.ts (GuardrailEngine.isFlagMatch) + server/cewEvaluator.ts + POST /api/flags/submit",
+      "status": "PASS - executed against real component"
+    },
+    {
+      "stage": 13,
+      "name": "Evaluation Rubric",
+      "component": "server/protocolV5.ts + components/FacultyReviewModal.tsx (9 dimensions, 10 critical failures, 4-part Section 2 pass rule)",
+      "status": "PASS - executed against real component"
+    },
+    {
+      "stage": 14,
+      "name": "Record Integrity",
+      "component": "server/studyInstrumentation.ts (evaluateExecutionRecordIntegrity: 9 automated RQ4 checks + automatic DefectRecord creation)",
+      "status": "PASS - executed against real component"
+    },
+    {
+      "stage": 15,
+      "name": "15-table export",
+      "component": "server/exportService.ts (15 JSON + 15 CSV tables + checksums.sha256 with uniform data_classification)",
+      "status": "PASS - executed against real component"
+    },
+    {
+      "stage": 16,
+      "name": "Analysis and reconstruction",
+      "component": "scripts/analyze_study_results.py + server/telemetry.ts (validateCaseReconstruction + RQ1-RQ4 statistical summary)",
+      "status": "PASS - executed against real component"
+    }
+  ],
+  "sectionResults": {
+    "section1_cleanRoomBuild": "PASS - executed against real component",
+    "section2_routeInventory": "PASS - executed against real component",
+    "section3_simulationFallbackAudit": "PASS - executed against real component",
+    "section4_realTerminalAndDocker": "NOT VERIFIED - requires Ubuntu server",
+    "section5_liveOllamaAndGuard": "NOT VERIFIED - requires Ubuntu server",
+    "section6_endToEndStudentWorkflow": "PASS - executed against real component",
+    "section7_socraticAndAnswerDisclosure": "PASS - executed against real component",
+    "section8_researchMethodTraceability": "PASS - executed against real component",
+    "section9_recordIntegrityAndReconstruction": "PASS - executed against real component",
+    "section10_securityAcceptance": "PASS - executed against real component",
+    "section11_backupResetExportAnalysis": "PASS - executed against real component",
+    "section12_browserUiVerification": "PASS - executed against real component"
+  },
+  "ubuntuServerReadinessCommands": [
+    "npm install",
+    "docker build -t linux-tutor-sandbox:latest -f Dockerfile.sandbox .",
+    "npm run lint && npm run build && npm test",
+    "npm run test:sandbox-smoke",
+    "npm run study:backup",
+    "npm run study:reset -- --confirm \"START NEW COLLECTION\"",
+    "npm run study:verify",
+    "npm run verify:collection-ready",
+    "python3 scripts/analyze_study_results.py --self-test",
+    "LLM_PROVIDER=ollama npm start"
+  ]
+}

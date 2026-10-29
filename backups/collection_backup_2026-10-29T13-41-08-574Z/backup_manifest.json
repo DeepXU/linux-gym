@@ -1,0 +1,12 @@
+{
+  "backupCreatedAt": "2026-10-29T13:41:08.576Z",
+  "protocolVersion": "V5.0.0",
+  "sourceFile": "data/research_lab.json",
+  "sha256": "405b88ab10f1fefbf7e4344a481109eb64d23bb04f04489d6b8d9e9fd324e7e3",
+  "recordCounts": {
+    "executions": 0,
+    "interactions": 0,
+    "telemetryEvents": 0,
+    "reviews": 0
+  }
+}

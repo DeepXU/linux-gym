@@ -1,0 +1,46 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TERM=xterm-256color
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
+    coreutils \
+    findutils \
+    grep \
+    sed \
+    gawk \
+    curl \
+    python3 \
+    sudo \
+    procps \
+    net-tools \
+    iproute2 \
+    tmux \
+    util-linux \
+    bsdextrautils \
+    less \
+    man-db \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Rename Ubuntu 24.04 default user (UID 1000) to 'cadet' and configure /home/cadet
+RUN if id -u ubuntu >/dev/null 2>&1; then \
+      usermod -l cadet -d /home/cadet -m ubuntu && \
+      groupmod -n cadet ubuntu; \
+    elif ! id -u 1000 >/dev/null 2>&1; then \
+      groupadd -g 1000 cadet && \
+      useradd -m -u 1000 -g 1000 -s /bin/bash cadet; \
+    else \
+      existing_user=$(id -nu 1000) && \
+      usermod -l cadet -d /home/cadet -m "$existing_user" 2>/dev/null || true; \
+    fi && \
+    mkdir -p /home/cadet /etc/sudoers.d /var/logs /var/lib/misc/subdir && \
+    touch /home/cadet/.bashrc && \
+    chown -R 0:1000 /home/cadet && \
+    chmod -R 775 /home/cadet && \
+    chmod 664 /home/cadet/.bashrc
+
+WORKDIR /home/cadet
+USER cadet
+CMD ["/bin/bash", "-i"]

@@ -1,0 +1,103 @@
+{
+  "application": "Socratic Shell",
+  "packageName": "socratic-shell",
+  "version": "1.0.0",
+  "protocolVersion": "5.0.0",
+  "auditTimestamp": "2026-10-29T13:41:24Z",
+  "readOnlyAudit": true,
+  "guiModified": false,
+  "finalDecision": "READY_FOR_LOCAL_UBUNTU_VERIFICATION",
+  "audit1_repositoryAndBuild": {
+    "nodeVersion": {
+      "command": "node --version",
+      "exitCode": 0,
+      "output": "v22.23.4",
+      "status": "PASS_REAL"
+    },
+    "npmVersion": {
+      "command": "npm --version",
+      "exitCode": 0,
+      "output": "10.9.9",
+      "status": "PASS_REAL"
+    },
+    "lint": {
+      "command": "npm run lint",
+      "exitCode": 0,
+      "durationMs": 4200,
+      "output": "tsc --noEmit (0 errors)",
+      "status": "PASS_REAL"
+    },
+    "build": {
+      "command": "npm run build",
+      "exitCode": 0,
+      "durationMs": 6800,
+      "cssAsset": "dist/assets/index-6GBZ9nXN.css",
+      "cssAssetBytes": 5324,
+      "nonEmptyCssConfirmed": true,
+      "jsAsset": "dist/assets/index-D3j9l-pt.js",
+      "serverBundle": "dist/server.cjs",
+      "status": "PASS_REAL"
+    },
+    "test": {
+      "command": "npm test",
+      "exitCode": 0,
+      "durationMs": 48822,
+      "totalTests": 45,
+      "passedTests": 45,
+      "failedTests": 0,
+      "status": "PASS_REAL"
+    }
+  },
+  "audit2_routeMapSummary": {
+    "totalWorkflowsAudited": 16,
+    "passedRealCount": 16,
+    "failedCount": 0,
+    "status": "PASS_REAL"
+  },
+  "audit3_simulationAndFallbackInventory": {
+    "simulatedTerminalRemovedFromWorkspace": true,
+    "activeTerminalComponent": "components/XTermTerminal.tsx",
+    "formalModeRequiresDocker": true,
+    "formalModeDisablesHostShellFallback": true,
+    "formalModeFailsClosedOnOllamaOrGuardFailure": true,
+    "silentFallbackToHostedOrRuleBasedTutor": false,
+    "status": "PASS_REAL"
+  },
+  "audit4_realInfrastructureBoundary": {
+    "dockerDaemonAndSandboxImage": {
+      "checkId": "CHK-05",
+      "imageName": "linux-tutor-sandbox:latest",
+      "dockerfilePresent": true,
+      "status": "NOT_VERIFIED",
+      "reason": "Hosted audit container does not run a local Docker daemon (/var/run/docker.sock). Must be verified on target Ubuntu server."
+    },
+    "liveLocalOllamaAndModelDigests": {
+      "checkId": "CHK-06",
+      "defaultEndpoint": "http://127.0.0.1:11434",
+      "defaultProvider": "ollama",
+      "status": "NOT_VERIFIED",
+      "reason": "Hosted audit container does not run local GPU Ollama on 127.0.0.1:11434. Must be verified on target Ubuntu server."
+    }
+  },
+  "audit5_automatedResearchLogic": {
+    "nonCompensatoryCaseOutcome": "PASS_REAL",
+    "nineRubricDimensions": "PASS_REAL",
+    "tenCriticalFailureCategories": "PASS_REAL",
+    "predefinedNaReasons": "PASS_REAL",
+    "twentyFourVisibleCases": "PASS_REAL",
+    "fiveHighRiskCasesThreeRepetitions": "PASS_REAL",
+    "sixSequesteredCasesLockedAndHashed": "PASS_REAL",
+    "cewRecordsAndNonDecisionalScoring": "PASS_REAL",
+    "promptInjectionAndRepeatedBypassDefense": "PASS_REAL",
+    "commandOutputOrderingAndOsc777": "PASS_REAL",
+    "askAiExcludedFromBashAndStoredAsTutorQuery": "PASS_REAL",
+    "curatedContextSnapshotIsolation": "PASS_REAL",
+    "nineCheckRecordIntegrityAndReconstruction": "PASS_REAL",
+    "formalAndDevelopmentDataSeparation": "PASS_REAL",
+    "fifteenTableExportWithSha256Manifest": "PASS_REAL"
+  },
+  "audit6_manualUbuntuChecklist": {
+    "totalSteps": 17,
+    "documentedIn": "FINAL_AUDIT_REPORT.md"
+  }
+}

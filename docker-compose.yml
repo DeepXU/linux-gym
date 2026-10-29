@@ -1,0 +1,57 @@
+services:
+  # 1. Local AI Inference Service with NVIDIA GPU acceleration (Ollama)
+  # Bound to dedicated Port 2004 in range 2000-2009 (No conflict with Open WebUI on 3000)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ctf-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0:11434
+      - OLLAMA_ORIGINS=*
+      - OLLAMA_NUM_PARALLEL=16
+      - OLLAMA_FLASH_ATTENTION=1
+      - OLLAMA_KEEP_ALIVE=24h
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # 2. Linux CTF Academy & Evaluation Harness Web Application
+  # Bound to dedicated Port 2000 in range 2000-2009
+  ctf-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ctf-academy-app
+    restart: unless-stopped
+    ports:
+      - "2000:2000"
+    environment:
+      - PORT=2000
+      - NODE_ENV=production
+      - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5-coder:7b}
+      - LLAMA_GUARD_MODEL=${LLAMA_GUARD_MODEL:-llama-guard3:1b}
+      - VLLM_BASE_URL=${VLLM_BASE_URL:-http://host.docker.internal:2005/v1}
+      - VLLM_MODEL=${VLLM_MODEL:-qwen2.5-coder:7b}
+      - DOCKER_SOCKET_PATH=/var/run/docker.sock
+      - DOCKER_IMAGE=linux-tutor-sandbox:latest
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock # Allows sandbox container creation
+      - ctf_data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - ollama
+
+volumes:
+  ollama_models:
+  ctf_data:

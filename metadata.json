@@ -1,0 +1,6 @@
+{
+  "name": "Socratic Shell",
+  "description": "Socratic Shell — Interactive Linux & Cybersecurity Terminal Lab with Evidence-Grounded Socratic AI Tutoring (Protocol V5.0.0)",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
