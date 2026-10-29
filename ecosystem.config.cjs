@@ -14,9 +14,7 @@ module.exports = {
         PORT: 2000,
         NODE_ENV: 'production',
         LLM_PROVIDER: 'ollama',
-        OLLAMA_BASE_URL: 'http://localhost:11434',
-        OLLAMA_MODEL: 'qwen2.5-coder:7b',
-        LLAMA_GUARD_MODEL: 'llama-guard3:1b',
+        OLLAMA_BASE_URL: 'http://localhost:2004',
         VLLM_BASE_URL: 'http://localhost:2005/v1'
       }
     }

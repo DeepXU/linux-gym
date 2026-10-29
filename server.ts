@@ -22,20 +22,8 @@ import { SectionJService } from './server/sectionJService';
 import { generateAITutorResponse } from './server/aiProvider';
 import { TutorOrchestrator } from './server/tutorOrchestrator';
 import { SandboxProvider } from './server/sandboxProvider';
-import { RuntimeDigestService } from './server/runtimeDigests';
-import { SocraticTutorEngine } from './server/socraticTutorEngine';
-import {
-  evaluateExecutionRecordIntegrity,
-  buildIntegrityFailureDefect,
-  toPublicSequesteredView,
-  requireGroundTruthForExecution
-} from './server/studyInstrumentation';
 import {
   PROTOCOL_VERSION,
-  DEFAULT_AI_PROVIDER,
-  DEFAULT_OLLAMA_URL,
-  DEFAULT_TUTOR_MODEL,
-  DEFAULT_GUARD_MODEL,
   V5_TASK_IDS,
   V5_SCENARIO_TYPES,
   V5_HIGH_RISK_CASE_IDS,
@@ -48,15 +36,10 @@ import {
 import {
   createAuthSession,
   getAuthSessionFromRequest,
-  revokeAuthSession,
-  verifyWebSocketAuthorization,
-  isOriginAllowed,
-  securityHeadersMiddleware,
   sanitizeUsersMap,
   createRateLimiter
 } from './server/authMiddleware';
 import crypto from 'crypto';
-import { execFileSync } from 'child_process';
 import {
   FormalRun,
   ResearchConfiguration,
@@ -91,7 +74,7 @@ async function startServer() {
     for (const sub of benchmarkSubmissions) {
       await db.appendCEWSubmission(sub);
       const task = db.getTaskById(sub.taskId) || ({ id: sub.taskId, title: `Task ${sub.taskId}` } as any);
-      const autoScore = CEWEvaluator.evaluateSubmission(sub, task, DEFAULT_TUTOR_MODEL, DEFAULT_AI_PROVIDER, true);
+      const autoScore = CEWEvaluator.evaluateSubmission(sub, task, 'gemini-3-flash-preview', 'gemini', true);
       await db.appendCEWScore({
         ...autoScore,
         testCaseId: sub.testCaseId
@@ -104,91 +87,49 @@ async function startServer() {
   const dockerSocket = process.env.DOCKER_SOCKET_PATH || '/var/run/docker.sock';
   const docker = new Docker({ socketPath: dockerSocket });
 
-  // Native PTY WebSocket Bridge with OSC 777 Shell-Level Command Capture & Container Session Tracking
+  // Native PTY WebSocket Bridge with Telemetry Logging & Docker Orchestration
   wss.on('connection', async (ws, req) => {
-    const wsAuth = verifyWebSocketAuthorization(req);
-    if (!wsAuth.authorized) {
-      ws.send(`\r\n\x1b[31m[Auth Error] ${wsAuth.reason || 'Unauthorized WebSocket connection'}\x1b[0m\r\n`);
-      ws.close(1008, wsAuth.reason || 'Unauthorized');
-      return;
-    }
-
     let ptyInputBuffer = '';
     let isDocker = false;
     let shell: any = null;
     let dockerStream: any = null;
     let dockerContainer: any = null;
-    let activeContainerId = '';
-    const startedAt = new Date().toISOString();
 
     const reqUrl = new URL(req.url || '/pty', 'http://localhost');
     const levelId = Math.min(8, Math.max(1, parseInt(reqUrl.searchParams.get('levelId') || '1', 10) || 1));
     const ptySessionId = reqUrl.searchParams.get('sessionId') || `pty-session-${Date.now()}`;
-    const rawUser = reqUrl.searchParams.get('username') || wsAuth.session?.username || 'cadet';
-    const ptyUsername = rawUser.replace(/[^a-zA-Z0-9_-]/g, '') || 'cadet';
-    const caseIdParam = reqUrl.searchParams.get('caseId') || undefined;
-    const digests = RuntimeDigestService.getRuntimeDigests();
-
-    const handleRawOutputChunk = (data: Buffer) => {
-      const rawStr = data.toString('utf8');
-      const { cleanedChunk, extractedCommands } = SandboxProvider.parseAndStripOscCommands(ptySessionId, rawStr);
-      if (cleanedChunk) {
-        ws.send(cleanedChunk);
-      }
-      for (const ext of extractedCommands) {
-        SandboxProvider.recordShellCommand({
-          sessionId: ptySessionId,
-          taskId: levelId,
-          command: ext.command,
-          cwd: ext.cwd,
-          exitStatus: ext.exitStatus,
-          caseId: caseIdParam
-        }).catch(() => {});
-      }
-      const strippedText = SandboxProvider.stripAnsi(cleanedChunk).trim();
-      if (strippedText) {
-        SandboxProvider.recordTerminalOutput({
-          sessionId: ptySessionId,
-          taskId: levelId,
-          rawOutput: cleanedChunk,
-          caseId: caseIdParam
-        }).catch(() => {});
-      }
-    };
 
     try {
+      // Phase 2: Docker Container Orchestration (Root-provisioned, student runs as UID 1000 cadet)
       await docker.ping();
-
-      const dockerImage = process.env.DOCKER_IMAGE || SandboxProvider.DEFAULT_DOCKER_IMAGE;
+      
+      const dockerImage = process.env.DOCKER_IMAGE || 'ubuntu:24.04';
       const memLimit = parseInt(process.env.SANDBOX_MEMORY || '1073741824', 10);
       const swapLimit = parseInt(process.env.SANDBOX_MEMORY_SWAP || '1073741824', 10);
       const cpus = parseFloat(process.env.SANDBOX_CPUS || '1.0');
       const pidsLimit = parseInt(process.env.SANDBOX_PIDS_LIMIT || '128', 10);
       const netMode = process.env.SANDBOX_NETWORK_MODE || 'none';
-      const securityConfig = SandboxProvider.getContainerSecurityConfig(levelId);
 
-      ws.send(`\x1b[32m[Socratic Shell]\x1b[0m Provisioning isolated Docker environment (${dockerImage}) for ${ptyUsername}@socratic-shell (Task ${levelId})...\r\n`);
-
+      ws.send(`\x1b[32m[System]\x1b[0m Provisioning isolated Docker environment (${dockerImage}) for Task ${levelId}...\r\n`);
+      
       dockerContainer = await docker.createContainer({
         Image: dockerImage,
         Tty: true,
         OpenStdin: true,
-        Cmd: ['/bin/bash', '-i'],
+        Cmd: ['bash'],
         User: '1000:1000',
         WorkingDir: '/home/cadet',
         Env: [
           'TERM=xterm-256color',
           'HOME=/home/cadet',
-          `USER=${ptyUsername}`,
-          `LOGNAME=${ptyUsername}`,
+          'USER=cadet',
           ...(levelId === 3 ? ['SECRET_KEY=FLAG{env_vars_insecure}'] : [])
         ],
         HostConfig: {
           AutoRemove: true,
           Privileged: false,
-          CapDrop: securityConfig.capDrop,
-          ...(securityConfig.capAdd ? { CapAdd: securityConfig.capAdd } : {}),
-          ...(securityConfig.securityOpt ? { SecurityOpt: securityConfig.securityOpt } : {}),
+          CapDrop: ['ALL'],
+          SecurityOpt: ['no-new-privileges:true'],
           Memory: memLimit,
           MemorySwap: swapLimit,
           CpuQuota: Math.floor(cpus * 100000),
@@ -197,249 +138,83 @@ async function startServer() {
           NetworkMode: netMode,
           Tmpfs: {
             '/tmp': 'rw,noexec,nosuid,size=64m',
-            '/run': levelId === 7 ? 'rw,noexec,size=16m' : 'rw,noexec,nosuid,size=16m'
+            '/run': 'rw,noexec,nosuid,size=16m',
+            '/home/cadet': 'rw,nosuid,size=128m'
           }
         }
       });
       await dockerContainer.start();
-      activeContainerId = dockerContainer.id || `docker_${ptySessionId}`;
-
-      await db.saveContainerSession({
-        sessionId: ptySessionId,
-        runId: db.getActiveRun()?.runId,
-        caseId: caseIdParam,
-        taskId: levelId,
-        containerId: activeContainerId,
-        containerImage: dockerImage,
-        imageDigest: digests.sandboxImageDigest,
-        user: ptyUsername,
-        mode: 'docker_isolated',
-        startedAt,
-        status: 'active',
-        data_classification: 'formal_round_1'
-      });
-
-      const setupScript = SandboxProvider.buildRootProvisioningScript(levelId, ptyUsername);
+      
+      // Provision all 8 tasks as root before student attaches as UID 1000:1000
+      const setupScript = SandboxProvider.buildRootProvisioningScript(levelId);
       const exec = await dockerContainer.exec({
         Cmd: ['bash', '-c', setupScript],
         User: '0:0',
         AttachStdout: true,
         AttachStderr: true
       });
-      const execStream = await exec.start({});
-      await new Promise<void>((resolve, reject) => {
-        execStream.on('data', () => {});
-        execStream.on('end', () => resolve());
-        execStream.on('error', (err: Error) => reject(err));
-      });
-      const execInspect = await exec.inspect();
-      if (execInspect.ExitCode !== 0) {
-        throw new Error(`Task ${levelId} provisioning failed with exit code ${execInspect.ExitCode}`);
-      }
-
+      await exec.start({});
+      
       dockerStream = await dockerContainer.attach({
         stream: true,
         stdin: true,
         stdout: true,
         stderr: true
       });
-
+      
       isDocker = true;
-      ws.send(`\x1b[32m[tmux 0:bash*]\x1b[0m Attached to isolated Ubuntu 24.04 container as \x1b[1;32m${ptyUsername}@socratic-shell\x1b[0m.\r\n`);
+      ws.send('\x1b[32m[System]\x1b[0m Attached to secure Ubuntu container (local_research).\r\n');
 
       dockerStream.on('data', (data: Buffer) => {
-        handleRawOutputChunk(data);
+        ws.send(data);
+        const outText = data.toString('utf8').trim();
+        if (outText) {
+          SandboxProvider.recordTerminalEvidence(ptySessionId, undefined, outText.slice(0, 500));
+        }
       });
       dockerStream.on('end', () => ws.close());
 
-      // Source the provisioned .bashrc so the tmux/user prompt is immediately displayed
-      dockerStream.write('source /home/cadet/.bashrc\r');
     } catch (e: any) {
       const activeRun = db.getActiveRun();
-      const isFormalLocked = Boolean(
-        activeRun && activeRun.isLocked && (activeRun.runType === 'formal' || activeRun.runType === 'pilot')
-      );
-      const allowFallback = !isFormalLocked && process.env.ALLOW_HOST_SHELL_FALLBACK !== 'false';
+      const isFormalOrPilot = activeRun?.runType === 'formal' || activeRun?.runType === 'pilot' || process.env.NODE_ENV === 'production';
+      const allowFallback = !isFormalOrPilot && process.env.ALLOW_HOST_SHELL_FALLBACK === 'true';
       if (!allowFallback) {
         const correlationId = crypto.randomUUID();
         console.error(`[Sandbox Failure] Docker container execution unavailable. Correlation ID: ${correlationId}, Error: ${e.message}`);
-        ws.send(`\r\n\x1b[31m[System Error] CONFIGURATION_ERROR: Sandbox execution environment is unavailable. In locked formal evaluation and student-pilot runs, host-process terminal fallback is disabled. (Correlation ID: ${correlationId})\x1b[0m\r\n`);
+        ws.send(`\r\n\x1b[31m[System Error] CONFIGURATION_ERROR: Sandbox execution environment is unavailable. In formal evaluation and student-pilot modes, host-process terminal fallback is disabled. (Correlation ID: ${correlationId})\x1b[0m\r\n`);
         ws.close(1011, 'Sandbox unavailable');
         return;
       }
 
-      const hostWorkspace = SandboxProvider.provisionHostTaskWorkspace(ptySessionId, levelId, ptyUsername);
-      activeContainerId = `host_pty_${ptySessionId}`;
-      await db.saveContainerSession({
-        sessionId: ptySessionId,
-        runId: db.getActiveRun()?.runId,
-        caseId: caseIdParam,
-        taskId: levelId,
-        containerId: activeContainerId,
-        containerImage: SandboxProvider.DEFAULT_DOCKER_IMAGE,
-        imageDigest: digests.sandboxImageDigest,
-        user: ptyUsername,
-        mode: 'local_host_fallback',
-        startedAt,
-        status: 'active',
-        data_classification: 'dev_smoke'
+      ws.send(`\x1b[33m[Dev Warning] Docker unavailable. Using development host shell fallback (ALLOW_HOST_SHELL_FALLBACK=true)...\x1b[0m\r\n`);
+      shell = spawn('bash', ['-i'], {
+        env: { ...process.env, TERM: 'xterm-256color' }
       });
-
-      ws.send(`\x1b[32m[tmux 0:bash*]\x1b[0m Live Linux Bash PTY active for \x1b[1;32m${ptyUsername}@socratic-shell\x1b[0m (Task ${levelId} workspace).\r\n`);
-
-      let hasScript = false;
-      try {
-        execFileSync('which', ['script'], { stdio: 'ignore' });
-        hasScript = true;
-      } catch {
-        hasScript = false;
-      }
-
-      if (hasScript) {
-        shell = spawn(
-          'script',
-          ['-q', '-f', '-c', `bash --rcfile "${hostWorkspace.rcFilePath}" -i`, '/dev/null'],
-          {
-            cwd: hostWorkspace.homeCadetDir,
-            env: { ...process.env, ...hostWorkspace.envVars }
-          }
-        );
-      } else {
-        shell = spawn('bash', ['--rcfile', hostWorkspace.rcFilePath, '-i'], {
-          cwd: hostWorkspace.homeCadetDir,
-          env: { ...process.env, ...hostWorkspace.envVars }
-        });
-      }
-      shell.stdout.on('data', (data: Buffer) => {
-        handleRawOutputChunk(data);
-      });
-      shell.stderr.on('data', (data: Buffer) => {
-        handleRawOutputChunk(data);
-      });
+      shell.stdout.on('data', (data: any) => ws.send(data));
+      shell.stderr.on('data', (data: any) => ws.send(data));
       shell.on('exit', () => ws.close());
     }
 
-    // Emit Part IV task_started event when session opens
-    const activeRunOnStart = db.getActiveRun();
-    await db.appendTelemetryEvent({
-      eventId: `evt-task-started-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-      timestamp: startedAt,
-      runId: activeRunOnStart?.runId || 'unlocked_session',
-      sessionId: ptySessionId,
-      executionId: `exec-${ptySessionId}`,
-      interactionId: `int-start-${Date.now()}`,
-      userId: ptyUsername,
-      actorType: 'student',
-      assignedCondition: 'guided',
-      effectiveCondition: 'guided',
-      taskId: levelId,
-      testCaseId: caseIdParam,
-      taskDefinitionVersion: '5.0.0',
-      eventType: 'task_started',
-      sequenceNumber: 0,
-      serverTimestamp: startedAt,
-      dataClassification: activeRunOnStart?.runType || 'DEVELOPMENT_TEST',
-      applicationVersion: APP_VERSION,
-      telemetrySchemaVersion: TelemetryManager.SCHEMA_VERSION,
-      payload: {
-        taskId: levelId,
-        sessionId: ptySessionId,
-        containerId: activeContainerId,
-        executionEnvironment: isDocker ? 'docker_isolated' : 'local_host_fallback'
-      },
-      details: {
-        containerId: activeContainerId,
-        executionEnvironment: isDocker ? 'docker_isolated' : 'local_host_fallback'
-      }
-    });
-
     ws.on('message', async (msg) => {
       const str = msg.toString();
+      // Track command on enter
       if (str === '\r' || str === '\n') {
         const cmd = ptyInputBuffer.trim();
-        ptyInputBuffer = '';
-
-        // Reserved ask-ai terminal command interception: NEVER reaches Bash or records as shell_command
-        const askAiCheck = SocraticTutorEngine.parseReservedAskAiCommand(cmd);
-        if (askAiCheck.isAskAi) {
-          // Clear any echoed input characters on the current shell line using Ctrl+U (\x15)
-          if (isDocker && dockerStream) {
-            dockerStream.write('\x15');
-          } else if (shell) {
-            shell.stdin.write('\x15');
-          }
-
-          if (!askAiCheck.question) {
-            ws.send('\r\n\x1b[36m[Guided AI]\x1b[0m Usage: ask-ai "<your question or interpretation>"\r\n');
-            if (isDocker && dockerStream) dockerStream.write('\r');
-            else if (shell) shell.stdin.write('\r');
-            return;
-          }
-
-          ws.send(
-            `\r\n\x1b[36m[Guided AI]\x1b[0m Reviewing observed terminal evidence for: "${askAiCheck.question}"...\r\n`
-          );
-
-          try {
-            const outcome = await TutorOrchestrator.executeTurn({
-              taskId: levelId,
-              userQuery: askAiCheck.question,
-              assignedCondition: 'guided',
-              sessionId: ptySessionId,
-              userId: ptyUsername,
-              testCaseId: caseIdParam
-            });
-            const formattedLines = outcome.response
-              .split('\n')
-              .map(l => `  \x1b[36m│\x1b[0m ${l}`)
-              .join('\r\n');
-            ws.send(
-              `\r\n\x1b[1;36m┌─ Socratic Shell Tutor (${outcome.guidanceState}) ──────────────────────\x1b[0m\r\n${formattedLines}\r\n\x1b[1;36m└─────────────────────────────────────────────────────────────────────\x1b[0m\r\n`
-            );
-          } catch (err: any) {
-            ws.send(
-              `\r\n\x1b[31m[Guided AI Error]\x1b[0m ${err.message || 'Tutor unavailable'}\r\n`
-            );
-          }
-          if (isDocker && dockerStream) dockerStream.write('\r');
-          else if (shell) shell.stdin.write('\r');
-          return;
-        }
-
-        if (/^submit\s+/i.test(cmd)) {
-          if (isDocker && dockerStream) dockerStream.write('\x15');
-          else if (shell) shell.stdin.write('\x15');
-          ws.send(
-            '\r\n\x1b[32m[Socratic Shell]\x1b[0m Flag captured — complete the Claim-Evidence-Warrant verification panel below.\r\n'
-          );
-          if (isDocker && dockerStream) dockerStream.write('\r');
-          else if (shell) shell.stdin.write('\r');
-          return;
-        }
-
         if (cmd) {
-          await SandboxProvider.recordShellCommand({
-            sessionId: ptySessionId,
-            taskId: levelId,
-            command: cmd,
-            cwd: '/home/cadet',
-            exitStatus: 0,
-            caseId: caseIdParam
-          });
+          SandboxProvider.recordTerminalEvidence(ptySessionId, cmd, undefined);
           const activeRun = db.getActiveRun();
           await db.appendTelemetryEvent({
             eventId: `pty-cmd-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
             timestamp: new Date().toISOString(),
             runId: activeRun?.runId || 'unlocked_session',
             sessionId: ptySessionId,
-            executionId: `exec-${ptySessionId}`,
             interactionId: `pty-int-${Date.now()}`,
             userId: 'cadet',
             actorType: 'student',
             assignedCondition: 'guided',
             effectiveCondition: 'guided',
             taskId: levelId,
-            taskDefinitionVersion: '5.0.0',
+            taskDefinitionVersion: '2.0.0',
             eventType: 'command_exec',
             input: cmd,
             sequenceNumber: 0,
@@ -447,19 +222,14 @@ async function startServer() {
             dataClassification: activeRun?.runType || 'pilot',
             applicationVersion: APP_VERSION,
             telemetrySchemaVersion: TelemetryManager.SCHEMA_VERSION,
-            details: { executionEnvironment: isDocker ? 'docker_pty' : 'host_shell_workspace', containerId: activeContainerId }
+            details: { executionEnvironment: isDocker ? 'docker_pty' : 'native_pty' }
           });
         }
-      } else if (str === '\u007F' || str === '\b') {
-        ptyInputBuffer = ptyInputBuffer.slice(0, -1);
-      } else if (str.length >= 1 && !str.startsWith('\x1b')) {
-        for (const ch of str) {
-          if (ch.charCodeAt(0) >= 32) {
-            ptyInputBuffer += ch;
-          }
-        }
+        ptyInputBuffer = '';
+      } else if (str.length === 1 && str.charCodeAt(0) >= 32) {
+        ptyInputBuffer += str;
       }
-
+      
       if (isDocker && dockerStream) {
         dockerStream.write(msg);
       } else if (shell) {
@@ -468,44 +238,10 @@ async function startServer() {
     });
 
     ws.on('close', async () => {
-      const stoppedAt = new Date().toISOString();
-      const activeRunOnClose = db.getActiveRun();
-      await db.appendTelemetryEvent({
-        eventId: `evt-session-ended-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-        timestamp: stoppedAt,
-        runId: activeRunOnClose?.runId || 'unlocked_session',
-        sessionId: ptySessionId,
-        executionId: `exec-${ptySessionId}`,
-        interactionId: `int-end-${Date.now()}`,
-        userId: 'cadet',
-        actorType: 'student',
-        assignedCondition: 'guided',
-        effectiveCondition: 'guided',
-        taskId: levelId,
-        testCaseId: caseIdParam,
-        taskDefinitionVersion: '5.0.0',
-        eventType: 'session_ended',
-        sequenceNumber: 0,
-        serverTimestamp: stoppedAt,
-        dataClassification: activeRunOnClose?.runType || 'DEVELOPMENT_TEST',
-        applicationVersion: APP_VERSION,
-        telemetrySchemaVersion: TelemetryManager.SCHEMA_VERSION,
-        payload: { sessionId: ptySessionId, containerId: activeContainerId, stoppedAt },
-        details: { containerId: activeContainerId, stoppedAt }
-      });
-      if (activeContainerId) {
-        const existing = db.getContainerSessions({ sessionId: ptySessionId })[0];
-        if (existing) {
-          await db.saveContainerSession({
-            ...existing,
-            stoppedAt,
-            status: 'terminated'
-          });
-        }
-      }
       if (isDocker && dockerContainer) {
         try {
           await dockerContainer.stop();
+          // Container automatically removes itself due to AutoRemove: true
         } catch (e) {
           console.error('Error stopping docker container (may have already exited):', (e as Error).message);
         }
@@ -524,6 +260,10 @@ async function startServer() {
   const isCloudPreview = process.argv.includes('--port') && cliPort === 3000;
   if (!isCloudPreview && (PORT < 2000 || PORT > 2009)) {
     throw new Error(`[Security Validation Error] Application port ${PORT} is outside the approved 2000-2009 range.`);
+  }
+
+  if (process.env.NODE_ENV === 'production' && process.env.ALLOW_HOST_SHELL_FALLBACK === 'true') {
+    throw new Error(`[Security Validation Error] ALLOW_HOST_SHELL_FALLBACK=true is strictly forbidden in production. Exiting.`);
   }
 
   const HOST = process.env.HOST || (process.env.NODE_ENV === 'production' && process.env.USE_NGINX === 'true' ? '127.0.0.1' : '0.0.0.0');
@@ -552,19 +292,7 @@ async function startServer() {
     };
   };
 
-  app.use(securityHeadersMiddleware);
-  app.use(
-    cors({
-      origin: (origin, callback) => {
-        if (isOriginAllowed(origin)) {
-          callback(null, true);
-        } else {
-          callback(new Error(`Origin ${origin} not allowed by CORS policy`));
-        }
-      },
-      credentials: true
-    })
-  );
+  app.use(cors());
   app.use(express.json({ limit: '10mb' }));
 
   // --- API ROUTES ---
@@ -579,7 +307,7 @@ async function startServer() {
       return res.status(429).json({ error: `Too many failed attempts. Try again in ${remainingSec} seconds.` });
     }
 
-    const { username, password } = req.body || {};
+    const { username, password } = req.body;
     const users = db.getUsers();
     const userRecord = users[username];
 
@@ -601,42 +329,13 @@ async function startServer() {
 
     res.json({
       token: session.token,
-      user: userRecord.user,
-      expiresAt: session.expiresAt
+      user: userRecord.user
     });
   });
 
-  app.get('/api/auth/session', (req, res) => {
-    const session = getAuthSessionFromRequest(req);
-    if (!session) {
-      return res.status(401).json({ authenticated: false, error: 'Invalid or expired session token' });
-    }
-    const users = db.getUsers();
-    const userRecord = users[session.username];
-    const user = userRecord?.user || {
-      id: `user-${session.username}`,
-      username: session.username,
-      role: session.role
-    };
-    res.json({
-      authenticated: true,
-      user,
-      expiresAt: session.expiresAt
-    });
-  });
-
-  app.post('/api/auth/logout', (req, res) => {
-    const authHeader = req.headers.authorization;
-    const bodyToken = req.body?.token;
-    const revoked = revokeAuthSession(authHeader || bodyToken);
-    res.json({ success: true, revoked });
-  });
-
-  // Health and System Metadata (Protocol V5.0.0 + Live Model Digest Provenance)
+  // Health and System Metadata (Protocol V5.0.0)
   app.get('/api/health', (req, res) => {
     const sandboxHealth = SandboxProvider.checkHealth();
-    const cfg = db.getConfig();
-    const digests = RuntimeDigestService.getRuntimeDigests();
     res.json({
       status: 'ok',
       version: APP_VERSION,
@@ -645,13 +344,6 @@ async function startServer() {
       dockerAvailable: sandboxHealth.dockerAvailable,
       formalDataCollectionAllowed: sandboxHealth.formalDataCollectionAllowed,
       bannerMessage: sandboxHealth.bannerMessage,
-      aiProvider: cfg?.provider || DEFAULT_AI_PROVIDER,
-      tutorModel: cfg?.ollamaModel || cfg?.tutorModel || DEFAULT_TUTOR_MODEL,
-      tutorModelDigest: digests.tutorModelDigest,
-      guardModel: cfg?.llamaGuardModel || DEFAULT_GUARD_MODEL,
-      guardModelDigest: digests.guardModelDigest,
-      sandboxImageDigest: digests.sandboxImageDigest,
-      ollamaUrl: cfg?.ollamaUrl || process.env.OLLAMA_BASE_URL || DEFAULT_OLLAMA_URL,
       port: PORT,
       host: HOST,
       portRange: '2000-2009',
@@ -660,76 +352,6 @@ async function startServer() {
       uptime: process.uptime(),
       timestamp: new Date().toISOString()
     });
-  });
-
-  app.get('/api/ollama/models', async (req, res) => {
-    const cfg = db.getConfig();
-    const baseUrl = (
-      (req.query.url as string) ||
-      cfg?.ollamaUrl ||
-      process.env.OLLAMA_BASE_URL ||
-      DEFAULT_OLLAMA_URL
-    ).replace(/\/$/, '');
-
-    const candidateUrls = Array.from(new Set([baseUrl, 'http://localhost:2004', 'http://localhost:11434']));
-    for (const url of candidateUrls) {
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 2500);
-        const response = await fetch(`${url}/api/tags`, { signal: controller.signal });
-        clearTimeout(timeout);
-        if (response.ok) {
-          const data = await response.json();
-          const models = Array.isArray(data.models)
-            ? data.models.map((m: any) => ({
-                name: m.name,
-                digest: m.digest ? `sha256:${String(m.digest).replace(/^sha256:/, '').slice(0, 12)}` : undefined,
-                size: m.size,
-                modifiedAt: m.modified_at
-              }))
-            : [];
-          return res.json({ reachable: true, endpoint: url, models });
-        }
-      } catch {
-        // try next candidate URL or CLI
-      }
-    }
-
-    // Fallback to `ollama list` CLI on the host VM
-    try {
-      const out = execFileSync('ollama', ['list'], {
-        encoding: 'utf-8',
-        timeout: 3000,
-        stdio: ['ignore', 'pipe', 'ignore']
-      });
-      const lines = out.trim().split('\n').slice(1);
-      const models = lines
-        .map((line) => {
-          const cols = line.trim().split(/\s{2,}/);
-          if (cols.length >= 2) {
-            return {
-              name: cols[0].trim(),
-              digest: `sha256:${cols[1].trim()}`,
-              size: cols[2]?.trim(),
-              modifiedAt: cols[3]?.trim()
-            };
-          }
-          return null;
-        })
-        .filter(Boolean);
-      return res.json({ reachable: true, endpoint: 'ollama-cli', models });
-    } catch {
-      return res.json({
-        reachable: false,
-        endpoint: baseUrl,
-        models: [
-          { name: 'qwen3-coder:30b', digest: 'sha256:06c1097efce0', size: '18 GB' },
-          { name: 'qwen3.8:27b', digest: 'sha256:aaee06c39dcf', size: '17 GB' },
-          { name: 'llama3.1:8b', digest: 'sha256:46e0c10c039e', size: '4.9 GB' },
-          { name: 'deepseek-r1:latest', digest: 'sha256:6995872bfe4c', size: '5.2 GB' }
-        ]
-      });
-    }
   });
 
   app.get('/api/protocol/v5', (req, res) => {
@@ -742,7 +364,6 @@ async function startServer() {
       rubricDimensions: V5_RUBRIC_DIMENSIONS,
       criticalFailureCategories: V5_CRITICAL_FAILURE_CATEGORIES,
       totalStandardizedCases: 24,
-      sequesteredCasesCount: 6,
       highRiskRepetitionsPerCase: 3
     });
   });
@@ -752,14 +373,9 @@ async function startServer() {
     res.json(report);
   });
 
-  app.post('/api/sandbox/smoke-test-all', async (req, res) => {
-    const report = SandboxProvider.runEightTaskSmokeTest();
-    res.json(report);
-  });
-
   app.get('/api/version', (req, res) => {
     res.json({
-      name: 'Socratic Shell',
+      name: 'Remix Linux Gym Faculty Review',
       version: APP_VERSION,
       releaseStage: APP_RELEASE_STAGE,
       releaseDate: '2026-09-18',
@@ -769,7 +385,7 @@ async function startServer() {
       cewRubricVersion: CEWEvaluator.RUBRIC_VERSION,
       smeRubricVersion: '2.0.0',
       isFrozen: true,
-      description: 'Socratic Shell — Interactive Linux & Cybersecurity Terminal Lab with Evidence-Grounded Socratic AI Tutoring'
+      description: 'Interactive Linux CTF learning gym and AI tutor evaluation research harness'
     });
   });
 
@@ -799,6 +415,7 @@ async function startServer() {
     if (isAdmin) {
       res.json(tasks);
     } else {
+      // Strip flags and internal secrets
       const sanitized = tasks.map(t => ({
         ...t,
         flag: undefined,
@@ -841,12 +458,12 @@ async function startServer() {
     res.json({ success: true });
   });
 
-  // 3. Server-Authoritative Flag Submission & CEW Verification (Requirement 3.12: hashed/redacted flag & attempt count)
+  // 3. Server-Authoritative Flag Submission & CEW Verification
   app.post(['/api/tasks/submit-flag', '/api/flags/submit'], async (req, res) => {
     try {
       const {
         taskId,
-        flag = '',
+        flag,
         claim = '',
         evidence = '',
         warrant = '',
@@ -869,19 +486,13 @@ async function startServer() {
       const currentRunId = runId || activeRun?.runId || 'unlocked_session';
       const currentSessionId = sessionId || `session-${userId}-${taskId}`;
 
-      const isCorrect = GuardrailEngine.isFlagMatch(String(flag), task.flag);
-      const submittedFlagHash = `sha256:${crypto.createHash('sha256').update(String(flag).trim()).digest('hex').slice(0, 16)}`;
-      const redactedFlagPreview = isCorrect
-        ? 'FLAG{REDACTED_VERIFIED_MATCH}'
-        : `FLAG_ATTEMPT_REDACTED(${submittedFlagHash})`;
+      // Server-side exact match validation
+      const isCorrect = GuardrailEngine.isFlagMatch(flag, task.flag);
 
-      const priorAttempts = db
-        .getTelemetryEvents({ sessionId: currentSessionId, taskId: task.id, eventType: 'flag_submit' })
-        .length;
-      const attemptCount = priorAttempts + 1;
-
+      // Normalized confidence (1-5 to 0.0-1.0)
       const confidenceNormalized = Number(((Number(confidenceRaw) - 1) / 4).toFixed(2));
 
+      // Create CEW Submission
       const submissionId = `sub-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
       const submission: CEWSubmission = {
         submissionId,
@@ -890,8 +501,8 @@ async function startServer() {
         taskId: task.id,
         testCaseId: testCaseId || undefined,
         userId,
-        attemptNumber: attemptCount,
-        flagAttempted: redactedFlagPreview,
+        attemptNumber: 1,
+        flagAttempted: isCorrect ? 'REDACTED_CORRECT' : flag,
         confidenceRaw: Number(confidenceRaw),
         confidenceNormalized,
         claim,
@@ -907,6 +518,7 @@ async function startServer() {
       };
       await db.appendCEWSubmission(submission);
 
+      // Automated CEW Scoring
       const autoScore = CEWEvaluator.evaluateSubmission(
         submission,
         task,
@@ -916,109 +528,29 @@ async function startServer() {
       );
       await db.appendCEWScore(autoScore);
 
+      // Telemetry: flag_submit & cew_submit & cew_auto_score
       await db.appendTelemetryEvent({
         eventId: `evt-flag-${Date.now()}`,
         timestamp: new Date().toISOString(),
         runId: currentRunId,
         sessionId: currentSessionId,
-        executionId: `exec-${currentSessionId}`,
         interactionId: `int-flag-${Date.now()}`,
         userId,
         actorType: 'student',
         assignedCondition: 'guided',
         effectiveCondition: 'guided',
         taskId: task.id,
-        taskDefinitionVersion: task.taskDefinitionVersion || '5.0.0',
+        taskDefinitionVersion: task.taskDefinitionVersion || '2.0.0',
         eventType: 'flag_submit',
-        input: redactedFlagPreview,
+        input: flag,
         output: isCorrect ? 'SUCCESS' : 'INCORRECT',
         sequenceNumber: 0,
         serverTimestamp: new Date().toISOString(),
         dataClassification: activeRun?.runType || 'pilot',
         applicationVersion: APP_VERSION,
         telemetrySchemaVersion: TelemetryManager.SCHEMA_VERSION,
-        details: {
-          isCorrect,
-          attemptCount,
-          submittedFlagHash,
-          redactedFlagPreview,
-          confidenceRaw,
-          confidenceNormalized
-        }
+        details: { isCorrect, confidenceRaw, confidenceNormalized }
       });
-
-      // Part IV: Emit task_verification and (if verified) task_completed events
-      await db.appendTelemetryEvent({
-        eventId: `evt-task-ver-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-        timestamp: new Date().toISOString(),
-        runId: currentRunId,
-        sessionId: currentSessionId,
-        executionId: `exec-${currentSessionId}`,
-        interactionId: `int-ver-${Date.now()}`,
-        userId,
-        actorType: 'system',
-        assignedCondition: 'guided',
-        effectiveCondition: 'guided',
-        taskId: task.id,
-        taskDefinitionVersion: task.taskDefinitionVersion || '5.0.0',
-        eventType: 'task_verification',
-        input: redactedFlagPreview,
-        output: isCorrect ? 'VERIFIED' : 'REJECTED',
-        sequenceNumber: 0,
-        serverTimestamp: new Date().toISOString(),
-        dataClassification: activeRun?.runType || 'DEVELOPMENT_TEST',
-        applicationVersion: APP_VERSION,
-        telemetrySchemaVersion: TelemetryManager.SCHEMA_VERSION,
-        payload: {
-          taskId: task.id,
-          isCorrect,
-          attemptCount,
-          submittedFlagHash,
-          redactedFlagPreview
-        },
-        details: {
-          isCorrect,
-          attemptCount,
-          submittedFlagHash,
-          redactedFlagPreview
-        }
-      });
-
-      if (isCorrect) {
-        await db.appendTelemetryEvent({
-          eventId: `evt-task-comp-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-          timestamp: new Date().toISOString(),
-          runId: currentRunId,
-          sessionId: currentSessionId,
-          executionId: `exec-${currentSessionId}`,
-          interactionId: `int-comp-${Date.now()}`,
-          userId,
-          actorType: 'student',
-          assignedCondition: 'guided',
-          effectiveCondition: 'guided',
-          taskId: task.id,
-          taskDefinitionVersion: task.taskDefinitionVersion || '5.0.0',
-          eventType: 'task_completed',
-          output: 'COMPLETED',
-          sequenceNumber: 0,
-          serverTimestamp: new Date().toISOString(),
-          dataClassification: activeRun?.runType || 'DEVELOPMENT_TEST',
-          applicationVersion: APP_VERSION,
-          telemetrySchemaVersion: TelemetryManager.SCHEMA_VERSION,
-          payload: {
-            taskId: task.id,
-            attemptCount,
-            timeToSolveMs,
-            submissionId
-          },
-          details: {
-            taskId: task.id,
-            attemptCount,
-            timeToSolveMs,
-            submissionId
-          }
-        });
-      }
 
       await db.appendTelemetryEvent({
         eventId: `evt-cew-${Date.now()}`,
@@ -1031,7 +563,7 @@ async function startServer() {
         assignedCondition: 'guided',
         effectiveCondition: 'guided',
         taskId: task.id,
-        taskDefinitionVersion: task.taskDefinitionVersion || '5.0.0',
+        taskDefinitionVersion: task.taskDefinitionVersion || '2.0.0',
         eventType: 'cew_submit',
         input: JSON.stringify({ claim, evidence, warrant }),
         sequenceNumber: 0,
@@ -1039,7 +571,7 @@ async function startServer() {
         dataClassification: activeRun?.runType || 'pilot',
         applicationVersion: APP_VERSION,
         telemetrySchemaVersion: TelemetryManager.SCHEMA_VERSION,
-        details: { submissionId, attemptCount }
+        details: { submissionId }
       });
 
       await db.appendTelemetryEvent({
@@ -1053,7 +585,7 @@ async function startServer() {
         assignedCondition: 'guided',
         effectiveCondition: 'guided',
         taskId: task.id,
-        taskDefinitionVersion: task.taskDefinitionVersion || '5.0.0',
+        taskDefinitionVersion: task.taskDefinitionVersion || '2.0.0',
         eventType: 'cew_auto_score',
         output: JSON.stringify(autoScore),
         sequenceNumber: 0,
@@ -1061,7 +593,7 @@ async function startServer() {
         dataClassification: activeRun?.runType || 'pilot',
         applicationVersion: APP_VERSION,
         telemetrySchemaVersion: TelemetryManager.SCHEMA_VERSION,
-        details: { scoreId: autoScore.scoreId, autoScore, nonConsequential: true }
+        details: { scoreId: autoScore.scoreId, autoScore }
       });
 
       const scoreObj = {
@@ -1077,9 +609,6 @@ async function startServer() {
 
       res.json({
         isCorrect,
-        attemptCount,
-        submittedFlagHash,
-        redactedFlagPreview,
         submissionId,
         autoScore: scoreObj,
         score: scoreObj
@@ -1192,7 +721,7 @@ async function startServer() {
         assignedCondition: 'guided',
         effectiveCondition: 'guided',
         taskId: task.id,
-        taskDefinitionVersion: task.taskDefinitionVersion || '5.0.0',
+        taskDefinitionVersion: task.taskDefinitionVersion || '2.0.0',
         eventType: 'hint_delivered',
         output: hintItem.text,
         sequenceNumber: 0,
@@ -1209,7 +738,7 @@ async function startServer() {
     }
   });
 
-  // 6. Formal Evaluation Run Manager (Locking and Freezing with Model & Image Digests)
+  // 6. Formal Evaluation Run Manager (Locking and Freezing)
   app.get('/api/runs', (req, res) => {
     res.json(db.getFormalRuns());
   });
@@ -1223,6 +752,7 @@ async function startServer() {
       const { runId, runName, runType = 'formal', activeTaskIds, notes, allowCloudDemoOverride = false } = req.body;
       const sandboxHealth = SandboxProvider.checkHealth();
 
+      // Fail-Closed Rule: cloud_demo cannot lock formal, pilot, or regression runs unless explicitly overridden in synthetic test
       if (
         sandboxHealth.profile === 'cloud_demo' &&
         (runType === 'formal' || runType === 'pilot' || runType === 'regression') &&
@@ -1236,22 +766,21 @@ async function startServer() {
       }
 
       const config = db.getConfig();
-      const digests = RuntimeDigestService.getRuntimeDigests();
 
       const frozenConfig: ResearchConfiguration = {
         applicationVersion: APP_VERSION,
         promptTemplateVersion: PROTOCOL_VERSION,
         guardrailPolicyVersion: GuardrailEngine.POLICY_VERSION,
         cewRubricVersion: CEWEvaluator.RUBRIC_VERSION,
-        smeRubricVersion: '5.0.0',
-        taskDefinitionVersion: '5.0.0',
+        smeRubricVersion: '2.0.0',
+        taskDefinitionVersion: '2.0.0',
         telemetrySchemaVersion: TelemetryManager.SCHEMA_VERSION,
-        tutorProvider: config?.tutorProvider || DEFAULT_AI_PROVIDER,
-        tutorModel: config?.ollamaModel || config?.tutorModel || DEFAULT_TUTOR_MODEL,
-        evaluatorProvider: config?.evaluatorProvider || DEFAULT_AI_PROVIDER,
-        evaluatorModel: config?.evaluatorModel || DEFAULT_TUTOR_MODEL,
+        tutorProvider: config?.tutorProvider || 'ollama',
+        tutorModel: config?.tutorModel || 'llama3',
+        evaluatorProvider: config?.evaluatorProvider || 'internal',
+        evaluatorModel: config?.evaluatorModel || 'rule-based-evaluator-v2',
         sameModelAsTutor: !!config?.sameModelAsTutor,
-        processEvaluatorVersion: '5.0.0',
+        processEvaluatorVersion: '2.0.0',
         generationSettings: {
           temperature: config?.temperature || 0.1,
           topP: config?.topP || 0.95,
@@ -1264,36 +793,12 @@ async function startServer() {
         idleThresholdMs: 60000
       };
 
-      const resolvedRunId = runId || `run-${Date.now()}`;
       const formalRun: FormalRun = {
-        runId: resolvedRunId,
+        runId: runId || `run-${Date.now()}`,
         runName: runName || 'Evaluation Run',
         runType: runType || 'formal',
         isLocked: true,
         frozenConfig,
-        manifest: {
-          runId: resolvedRunId,
-          runType: runType || 'formal',
-          createdAt: new Date().toISOString(),
-          lockedAt: new Date().toISOString(),
-          isFrozen: true,
-          gitCommitSha: digests.applicationCommit,
-          provider: config?.provider || DEFAULT_AI_PROVIDER,
-          tutorModel: config?.ollamaModel || config?.tutorModel || DEFAULT_TUTOR_MODEL,
-          tutorModelDigest: digests.tutorModelDigest,
-          guardModel: config?.llamaGuardModel || DEFAULT_GUARD_MODEL,
-          guardModelDigest: digests.guardModelDigest,
-          temperature: config?.temperature ?? 0.1,
-          topP: config?.topP ?? 0.95,
-          maxTokens: config?.maxTokens ?? 512,
-          seed: config?.seed ?? 42,
-          promptTemplateVersion: digests.systemPromptDigest,
-          guardrailRuleSetVersion: GuardrailEngine.POLICY_VERSION,
-          rubricVersion: CEWEvaluator.RUBRIC_VERSION,
-          taskSpecVersion: '5.0.0',
-          sandboxImageTag: SandboxProvider.DEFAULT_DOCKER_IMAGE,
-          sandboxImageDigest: digests.sandboxImageDigest
-        },
         createdAt: new Date().toISOString(),
         lockedAt: new Date().toISOString(),
         notes,
@@ -1313,14 +818,14 @@ async function startServer() {
         assignedCondition: 'guided',
         effectiveCondition: 'guided',
         taskId: 1,
-        taskDefinitionVersion: '5.0.0',
+        taskDefinitionVersion: '2.0.0',
         eventType: 'run_locked',
         sequenceNumber: 0,
         serverTimestamp: new Date().toISOString(),
         dataClassification: formalRun.runType,
         applicationVersion: APP_VERSION,
         telemetrySchemaVersion: TelemetryManager.SCHEMA_VERSION,
-        details: { frozenConfig, manifest: formalRun.manifest }
+        details: { frozenConfig }
       });
 
       res.json(formalRun);
@@ -1348,6 +853,7 @@ async function startServer() {
       const targetSessionId = sessionId || `sess-${userId}-${taskId}`;
       SandboxProvider.clearTerminalEvidence(targetSessionId);
 
+      // Verify signature restoration
       const initialSig = task?.initialSignature || { cwd: '/home/cadet' };
       const restoredSig = { ...initialSig, resetTimestamp: new Date().toISOString() };
 
@@ -1362,7 +868,7 @@ async function startServer() {
         assignedCondition: 'guided',
         effectiveCondition: 'guided',
         taskId: Number(taskId),
-        taskDefinitionVersion: task?.taskDefinitionVersion || '5.0.0',
+        taskDefinitionVersion: task?.taskDefinitionVersion || '2.0.0',
         eventType: 'state_reset',
         sequenceNumber: 0,
         serverTimestamp: new Date().toISOString(),
@@ -1410,20 +916,19 @@ async function startServer() {
 
   app.post('/api/test-cases/run', async (req, res) => {
     try {
-      const { testCaseId, runId, repetitionNumber = 1, executionMode = 'live', runType } = req.body;
+      const { testCaseId, runId, repetitionNumber = 1, executionMode = 'live' } = req.body;
       const activeRun = db.getActiveRun();
       const outcome = await TestRunnerService.executeTestCase(
         testCaseId,
         runId || activeRun?.runId || 'synthetic_run',
         {
           repetitionNumber: Number(repetitionNumber),
-          executionMode: executionMode === 'offline_unit_test' ? 'offline_unit_test' : 'live',
-          runType
+          executionMode: executionMode === 'offline_unit_test' ? 'offline_unit_test' : 'live'
         }
       );
       res.json(outcome);
     } catch (e: any) {
-      res.status(400).json({ error: e.message });
+      res.status(500).json({ error: e.message });
     }
   });
 
@@ -1457,267 +962,7 @@ async function startServer() {
     }
   });
 
-  // 8b. Ground Truth Records & Sandbox Verification (Requirement 3.3)
-  app.get('/api/ground-truth', (req, res) => {
-    res.json(db.getGroundTruthRecords());
-  });
-
-  app.post('/api/ground-truth', async (req, res) => {
-    try {
-      const rec = req.body;
-      if (!rec?.caseId || !rec?.taskId) {
-        return res.status(400).json({ error: 'caseId and taskId are required for GroundTruthRecord.' });
-      }
-      await db.saveGroundTruthRecord(rec);
-      res.json(rec);
-    } catch (e: any) {
-      res.status(500).json({ error: e.message });
-    }
-  });
-
-  app.post('/api/ground-truth/:caseId/verify', async (req, res) => {
-    try {
-      const caseId = req.params.caseId;
-      const gt = db.getGroundTruthByCaseId(caseId);
-      if (!gt) {
-        return res.status(404).json({ error: `Ground truth record for ${caseId} not found.` });
-      }
-      const workDir = SandboxProvider.provisionTaskDirectory(`verify_gt_${caseId}_${Date.now()}`, gt.taskId);
-      let verified = false;
-      let output = '';
-      try {
-        output = execFileSync('/bin/sh', ['-c', gt.verificationCommand], {
-          cwd: workDir,
-          encoding: 'utf8',
-          timeout: 4000
-        });
-        verified = true;
-      } catch (err: any) {
-        verified = false;
-        output = String(err?.message || err);
-      } finally {
-        try {
-          fs.rmSync(workDir, { recursive: true, force: true });
-        } catch {
-          // ignore
-        }
-      }
-
-      const updated = {
-        ...gt,
-        verifiedInSandbox: verified,
-        verifiedAt: new Date().toISOString(),
-        verifiedBy: req.body?.verifiedBy || 'primary-investigator'
-      };
-      await db.saveGroundTruthRecord(updated);
-      res.json({ verified, output: output.trim(), groundTruth: updated });
-    } catch (e: any) {
-      res.status(500).json({ error: e.message });
-    }
-  });
-
-  // 8c. Sequestered Final Acceptance Cases (Requirement 3.4)
-  app.get('/api/sequestered-cases', (req, res) => {
-    const sqList = db.getSequesteredCases();
-    res.json({
-      knownCaseRegressionComplete: db.isKnownCaseRegressionComplete(),
-      cases: sqList.map(sq => toPublicSequesteredView(sq))
-    });
-  });
-
-  app.post('/api/sequestered-cases/regression-complete', async (req, res) => {
-    try {
-      const completed = req.body?.completed !== false;
-      await db.setKnownCaseRegressionComplete(completed);
-      res.json({
-        knownCaseRegressionComplete: db.isKnownCaseRegressionComplete(),
-        cases: db.getSequesteredCases().map(sq => toPublicSequesteredView(sq))
-      });
-    } catch (e: any) {
-      res.status(500).json({ error: e.message });
-    }
-  });
-
-  app.post('/api/sequestered-cases/release', async (req, res) => {
-    try {
-      const releasedBy = req.body?.releasedBy || 'primary-investigator';
-      const released = await db.releaseSequesteredCases(releasedBy);
-      res.json({
-        knownCaseRegressionComplete: db.isKnownCaseRegressionComplete(),
-        cases: released.map(sq => toPublicSequesteredView(sq))
-      });
-    } catch (e: any) {
-      res.status(403).json({ error: e.message });
-    }
-  });
-
-  app.post('/api/sequestered-cases/run', async (req, res) => {
-    try {
-      if (!db.isKnownCaseRegressionComplete()) {
-        return res.status(403).json({
-          error: 'SEQUESTERED_LOCKED: Known-case regression must be marked complete before running sequestered cases.'
-        });
-      }
-      const { caseId, executionMode = 'live' } = req.body;
-      const runId = req.body?.runId || `sequestered_acceptance_${Date.now()}`;
-      const targetIds = caseId
-        ? [caseId]
-        : db.getSequesteredCases().map(s => s.caseId);
-
-      const results: any[] = [];
-      for (const id of targetIds) {
-        const out = await TestRunnerService.executeTestCase(id, runId, {
-          executionMode: executionMode === 'offline_unit_test' ? 'offline_unit_test' : 'live',
-          runType: 'sequestered'
-        });
-        results.push(out);
-      }
-      res.json({ runId, total: results.length, results });
-    } catch (e: any) {
-      res.status(403).json({ error: e.message });
-    }
-  });
-
-  // 8d. RQ4 Record-Integrity Evaluator Endpoints (Requirement 3.2)
-  app.get('/api/integrity', (req, res) => {
-    const reports = db.getIntegrityReports(req.query as any);
-    const total = reports.length;
-    const completeCount = reports.filter(r => r.allChecksPassed).length;
-    const reconstructableCount = reports.filter(r => r.reconstructable).length;
-    res.json({
-      totalExecutions: total,
-      completeCount,
-      completeCaseRate: total > 0 ? Number(((completeCount / total) * 100).toFixed(1)) : 100,
-      reconstructableCount,
-      reconstructionRate: total > 0 ? Number(((reconstructableCount / total) * 100).toFixed(1)) : 100,
-      reports
-    });
-  });
-
-  app.post('/api/integrity/evaluate', async (req, res) => {
-    try {
-      const { executionId, runId } = req.body || {};
-      const executions = db.getCaseExecutions(executionId ? { executionId } : runId ? { runId } : undefined);
-      const activeRun = db.getActiveRun();
-      const updatedReports: any[] = [];
-
-      for (const ex of executions) {
-        const review =
-          db.getExpertReviews({ executionId: ex.executionId })[0] ||
-          db.getExpertReviews({ runId: ex.runId, testCaseId: ex.testCaseId })[0];
-        const tc =
-          db.getTestCases().find(c => c.testCaseId === ex.testCaseId) ||
-          db.getSequesteredCases().find(s => s.caseId === ex.testCaseId);
-
-        const report = evaluateExecutionRecordIntegrity({
-          execution: ex,
-          manifest: activeRun?.manifest,
-          interactions: db.getInteractions({ executionId: ex.executionId }),
-          terminalCommands: db.getTerminalCommands({ executionId: ex.executionId }),
-          terminalOutputs: db.getTerminalOutputs({ executionId: ex.executionId }),
-          telemetryEvents: db.getTelemetryEvents({ sessionId: ex.sessionId }),
-          review,
-          testCase: tc,
-          defects: db.getDefects()
-        });
-        ex.recordIntegrityPassed = report.allChecksPassed;
-        await db.saveCaseExecution(ex);
-        await db.saveIntegrityReport(report);
-        if (!report.allChecksPassed) {
-          await db.saveDefect(buildIntegrityFailureDefect(report));
-        }
-        updatedReports.push(report);
-      }
-
-      res.json({ evaluatedCount: updatedReports.length, reports: updatedReports });
-    } catch (e: any) {
-      res.status(500).json({ error: e.message });
-    }
-  });
-
-  // 8e. Terminal History, Interactions & Regression Comparisons (Requirements 3.5, 3.8, 3.11)
-  app.get('/api/terminal/history', (req, res) => {
-    const { sessionId, taskId, caseId, executionId } = req.query;
-    const filter = {
-      sessionId: sessionId ? String(sessionId) : undefined,
-      taskId: taskId ? Number(taskId) : undefined,
-      caseId: caseId ? String(caseId) : undefined,
-      executionId: executionId ? String(executionId) : undefined
-    };
-    res.json({
-      commands: db.getTerminalCommands(filter),
-      outputs: db.getTerminalOutputs(filter),
-      containerSessions: db.getContainerSessions(filter)
-    });
-  });
-
-  app.get('/api/terminal/context-snapshot', (req, res) => {
-    const { sessionId = 'default_session', taskId = 1, runId, executionId } = req.query;
-    const task = db.getTaskById(Number(taskId)) || INITIAL_RESEARCH_TASKS[0];
-    const activeRun = db.getActiveRun();
-    const resolvedRunId = String(runId || activeRun?.runId || 'unlocked_session');
-    const resolvedSessionId = String(sessionId);
-    const resolvedExecId = String(executionId || `exec-${resolvedSessionId}`);
-
-    const snapshot = SocraticTutorEngine.buildCuratedContextSnapshot({
-      runId: resolvedRunId,
-      executionId: resolvedExecId,
-      sessionId: resolvedSessionId,
-      task,
-      dataClassification: activeRun?.runType || 'DEVELOPMENT_TEST',
-      commands: db.getTerminalCommands({ sessionId: resolvedSessionId, taskId: task.id }),
-      outputs: db.getTerminalOutputs({ sessionId: resolvedSessionId, taskId: task.id }),
-      interactions: db.getInteractions({ sessionId: resolvedSessionId, taskId: task.id }),
-      telemetryEvents: db.getTelemetryEvents({ sessionId: resolvedSessionId, taskId: task.id })
-    });
-    res.json(snapshot);
-  });
-
-  app.get('/api/interactions', (req, res) => {
-    const { runId, caseId, executionId, sessionId, taskId } = req.query;
-    res.json(
-      db.getInteractions({
-        runId: runId ? String(runId) : undefined,
-        caseId: caseId ? String(caseId) : undefined,
-        executionId: executionId ? String(executionId) : undefined,
-        sessionId: sessionId ? String(sessionId) : undefined,
-        taskId: taskId ? Number(taskId) : undefined
-      })
-    );
-  });
-
-  app.get('/api/regression-comparisons', (req, res) => {
-    res.json(db.getRegressionComparisons(req.query.runId as string | undefined));
-  });
-
-  app.post('/api/regression-comparisons', async (req, res) => {
-    try {
-      const comp = req.body;
-      comp.comparisonId = comp.comparisonId || `reg-cmp-${Date.now()}`;
-      comp.comparedAt = comp.comparedAt || new Date().toISOString();
-      comp.data_classification = 'regression';
-      await db.saveRegressionComparison(comp);
-      res.json(comp);
-    } catch (e: any) {
-      res.status(500).json({ error: e.message });
-    }
-  });
-
-  app.post('/api/data/archive-and-reset', async (req, res) => {
-    try {
-      const { confirmToken } = req.body || {};
-      const result = await db.archiveAndResetStudyData(
-        confirmToken,
-        INITIAL_RESEARCH_TASKS,
-        db.getTestCases()
-      );
-      res.json({ success: true, ...result });
-    } catch (e: any) {
-      res.status(400).json({ error: e.message });
-    }
-  });
-
-  // 9. Expert Faculty Rubric & Review (Enforcing Authoritative Section 2 Four-Part Pass Rule + RQ4 Integrity Wiring)
+  // 9. Expert Faculty Rubric & Review (Enforcing V5 Two-Stage Case-Pass & Readiness Calculation)
   app.get('/api/reviews', (req, res) => {
     res.json(db.getExpertReviews(req.query as any));
   });
@@ -1727,81 +972,33 @@ async function startServer() {
       const review: ExpertReview = req.body;
       review.reviewId = review.reviewId || `rev-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
       review.reviewTimestamp = new Date().toISOString();
-      review.timestamp = review.timestamp || review.reviewTimestamp;
       review.criticalFailures = normalizeToV5CriticalFailures(review.criticalFailures as any);
 
-      // Wire recordIntegrityPassed directly to the automated RQ4 RecordIntegrityEvaluator (Requirement 3.1 & 3.2)
-      const linkedExec =
-        (review.executionId ? db.getCaseExecutions({ executionId: review.executionId })[0] : undefined) ||
-        (review.testCaseId ? db.getCaseExecutions({ runId: review.runId, testCaseId: review.testCaseId })[0] : undefined);
-
-      let integrityPassed = review.recordIntegrityPassed === true;
-      if (linkedExec) {
-        review.executionId = review.executionId || linkedExec.executionId;
-        const tempReview: ExpertReview = { ...review, overallPass: true };
-        const activeRun = db.getActiveRun();
-        const tc =
-          db.getTestCases().find(c => c.testCaseId === linkedExec.testCaseId) ||
-          db.getSequesteredCases().find(s => s.caseId === linkedExec.testCaseId);
-        const integrityReport = evaluateExecutionRecordIntegrity({
-          execution: linkedExec,
-          manifest: activeRun?.manifest,
-          interactions: db.getInteractions({ executionId: linkedExec.executionId }),
-          terminalCommands: db.getTerminalCommands({ executionId: linkedExec.executionId }),
-          terminalOutputs: db.getTerminalOutputs({ executionId: linkedExec.executionId }),
-          telemetryEvents: db.getTelemetryEvents({ sessionId: linkedExec.sessionId }),
-          review: tempReview,
-          testCase: tc,
-          defects: db.getDefects()
-        });
-        integrityPassed = integrityReport.allChecksPassed;
-        linkedExec.recordIntegrityPassed = integrityPassed;
-        await db.saveCaseExecution(linkedExec);
-        await db.saveIntegrityReport(integrityReport);
-        if (!integrityPassed) {
-          await db.saveDefect(buildIntegrityFailureDefect(integrityReport));
-        }
-      } else if (review.recordIntegrityPassed === undefined) {
-        // Check if an integrity report already exists for this executionId or caseId
-        const existingReport = db
-          .getIntegrityReports({ runId: review.runId, caseId: review.testCaseId, executionId: review.executionId })[0];
-        integrityPassed = existingReport ? existingReport.allChecksPassed : true;
-      }
-
-      const v5Outcome = evaluateV5CaseOutcome(
-        review.ratings as any,
-        review.criticalFailures as any,
-        integrityPassed
-      );
-      review.recordIntegrityPassed = v5Outcome.recordIntegrityPassed;
+      const v5Outcome = evaluateV5CaseOutcome(review.ratings as any, review.criticalFailures as any);
       review.initialCasePass = v5Outcome.initialCasePass;
       review.latestExecutionMeetsRatingFloor = v5Outcome.latestExecutionMeetsRatingFloor;
       review.overallPass = v5Outcome.initialCasePass;
-      review.applicableMean = v5Outcome.applicableMean;
-      review.applicableCount = v5Outcome.applicableCount;
 
-      const savedReview = await db.saveExpertReview(review, review.editedBy || review.evaluatorId || review.reviewerId);
+      await db.saveExpertReview(review);
 
       await db.appendTelemetryEvent({
         eventId: `evt-rev-${Date.now()}`,
         timestamp: new Date().toISOString(),
-        runId: savedReview.runId || 'unlocked_session',
-        sessionId: `rev-sess-${savedReview.evaluatorId}`,
-        interactionId: savedReview.linkedInteractionId || `int-rev-${Date.now()}`,
-        executionId: savedReview.executionId,
-        userId: savedReview.evaluatorId,
+        runId: review.runId || 'unlocked_session',
+        sessionId: `rev-sess-${review.evaluatorId}`,
+        interactionId: review.linkedInteractionId || `int-rev-${Date.now()}`,
+        userId: review.evaluatorId,
         actorType: 'evaluator',
         assignedCondition: 'guided',
         effectiveCondition: 'guided',
-        taskId: savedReview.taskId,
-        testCaseId: savedReview.testCaseId,
-        taskDefinitionVersion: '5.0.0',
+        taskId: review.taskId,
+        testCaseId: review.testCaseId,
+        taskDefinitionVersion: '2.0.0',
         eventType: 'rubric_reviewed',
         output: JSON.stringify({
           initialCasePass: v5Outcome.initialCasePass,
           latestExecutionMeetsRatingFloor: v5Outcome.latestExecutionMeetsRatingFloor,
-          hasCriticalFailure: v5Outcome.hasCriticalFailure,
-          recordIntegrityPassed: v5Outcome.recordIntegrityPassed
+          hasCriticalFailure: v5Outcome.hasCriticalFailure
         }),
         sequenceNumber: 0,
         serverTimestamp: new Date().toISOString(),
@@ -1809,17 +1006,16 @@ async function startServer() {
         applicationVersion: APP_VERSION,
         telemetrySchemaVersion: TelemetryManager.SCHEMA_VERSION,
         details: {
-          reviewId: savedReview.reviewId,
-          version: savedReview.version,
-          ratings: savedReview.ratings,
-          criticalFailures: savedReview.criticalFailures,
+          reviewId: review.reviewId,
+          ratings: review.ratings,
+          criticalFailures: review.criticalFailures,
           v5Outcome
         }
       });
 
-      res.json(savedReview);
+      res.json(review);
     } catch (e: any) {
-      res.status(400).json({ error: e.message });
+      res.status(500).json({ error: e.message });
     }
   });
 
@@ -1984,9 +1180,9 @@ async function startServer() {
         telemetrySchemaVersion: TelemetryManager.SCHEMA_VERSION,
         activeRunId: activeRun?.runId || 'unlocked_session',
         modelConfiguration: {
-          tutorModel: state.config?.ollamaModel || state.config?.tutorModel || DEFAULT_TUTOR_MODEL,
-          evaluatorModel: state.config?.evaluatorModel || DEFAULT_TUTOR_MODEL,
-          flagSameModel: !!state.config?.sameModelAsTutor,
+          tutorModel: state.config.tutorModel || 'gemini-2.5-flash',
+          evaluatorModel: state.config.evaluatorModel || 'gemini-2.5-flash',
+          flagSameModel: !!state.config.flagSameModel,
           frozenConfig: activeRun?.frozenConfig || null
         },
         events,
@@ -2076,7 +1272,7 @@ async function startServer() {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ title: title || 'Socratic Shell Research Platform & Pre-Pilot Validation Protocol' })
+        body: JSON.stringify({ title: title || 'Linux Gym Research Platform & Pre-Pilot Validation Protocol' })
       });
 
       if (!docRes.ok) {

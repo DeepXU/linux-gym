@@ -1,25 +1,14 @@
-import { Level, Difficulty } from '../types';
-import { INITIAL_LEVELS, DEFAULT_HOW_TO_WORK } from '../constants';
+import { Level, Difficulty, TaskDomain, TaskType } from '../types';
 
-const RAW_SERVER_TASKS: Level[] = [
+export const INITIAL_RESEARCH_TASKS: Level[] = [
   {
     id: 1,
     taskId: 'TASK-001',
-    taskDefinitionVersion: '5.0.0',
+    taskDefinitionVersion: '2.0.0',
     title: 'The Beginning',
     description: 'You have dropped into a new system. Your first order of business is to get your bearings and find the welcome note left by the previous admin.',
     difficulty: Difficulty.EASY,
-    objective: 'Identify the onboarding note in your current working directory and inspect its contents.',
-    studentTask: 'List the contents of your home directory and read the onboarding text file.',
-    goal: 'Observe the directory listing in `/home/cadet` and display the contents of the onboarding note.',
-    context: 'You have just logged into a fresh Linux terminal session. System administrators often leave plaintext onboarding notes in the user home directory. Before running unfamiliar programs, you should inspect what files exist in your current location.',
-    successEvidence: 'Terminal evidence showing directory enumeration and file content inspection, followed by submitting the discovered verification flag token.',
-    howToWork: DEFAULT_HOW_TO_WORK,
-    constraints: [
-      'Working directory: /home/cadet',
-      'Offline isolated sandbox (no external internet access)',
-      'Standard user account (sudo privileges disabled)'
-    ],
+    objective: 'Find the welcome message file in your home directory and read it.',
     flag: 'FLAG{linux_basics_mastered}',
     systemContext: `
       You are a standard Linux shell (bash). 
@@ -47,7 +36,7 @@ const RAW_SERVER_TASKS: Level[] = [
       { level: 0, title: 'Clarification', text: 'What command have you executed to inspect what is currently in your working directory?' },
       { level: 1, title: 'Socratic Inquiry', text: 'Which core utility lists files in the current working directory?' },
       { level: 2, title: 'Conceptual Reminder', text: 'Remember that files must first be listed before their contents can be read.' },
-      { level: 3, title: 'Procedural Guidance', text: 'Use a directory listing utility to inspect current directory entries, then read the discovered onboarding note.' },
+      { level: 3, title: 'Procedural Guidance', text: 'Use `ls` to list directory contents, then locate a file named welcome.txt.' },
       { level: 4, title: 'Bounded Example', text: 'For example, you can view file contents using `cat <filename>`.' }
     ],
     prohibitedDisclosures: ['welcome.txt', 'FLAG{linux_basics_mastered}', 'cat welcome.txt'],
@@ -60,21 +49,11 @@ const RAW_SERVER_TASKS: Level[] = [
   {
     id: 2,
     taskId: 'TASK-002',
-    taskDefinitionVersion: '5.0.0',
+    taskDefinitionVersion: '2.0.0',
     title: 'Hidden Secrets',
     description: 'Intelligence suggests there is a config file in this directory, but a standard file listing does not reveal it.',
     difficulty: Difficulty.EASY,
-    objective: 'Discover the hidden configuration entry in `/home/cadet` and inspect its contents.',
-    studentTask: 'Locate the hidden configuration file in your home directory and read its contents.',
-    goal: 'Reveal hidden directory entries in `/home/cadet` and inspect the hidden configuration file without receiving the filename directly.',
-    context: 'Linux utilities omit certain configuration entries from default directory listings to keep working directories tidy. You need to determine how directory listing commands handle hidden entries and inspect the local manual page to identify the appropriate option.',
-    successEvidence: 'Terminal evidence showing hidden entries in `/home/cadet` and inspection of the hidden file, followed by submitting the discovered verification flag token.',
-    howToWork: DEFAULT_HOW_TO_WORK,
-    constraints: [
-      'Working directory: /home/cadet',
-      'Offline isolated sandbox (use local documentation such as man or --help)',
-      'Standard user account (sudo privileges disabled)'
-    ],
+    objective: 'Locate the hidden configuration file in your current directory and read its contents.',
     flag: 'FLAG{hidden_files_revealed}',
     systemContext: `
       User: cadet
@@ -86,8 +65,8 @@ const RAW_SERVER_TASKS: Level[] = [
       ├── public.txt
     `,
     hints: [
-      "What kinds of entries might a default directory listing omit?",
-      'Consult the local manual page for your listing utility to see how hidden entries are controlled.'
+      "There is a command argument that shows 'all' files.",
+      'In Linux, files starting with a specific character are hidden by default.'
     ],
     clo: 'CLO-2: Linux filesystem dotfile conventions and command-line argument mechanics.',
     taskDomain: 'navigation',
@@ -100,9 +79,9 @@ const RAW_SERVER_TASKS: Level[] = [
       { level: 1, title: 'Socratic Inquiry', text: 'Why might a standard `ls` command omit certain files by default?' },
       { level: 2, title: 'Conceptual Reminder', text: 'Linux treats files beginning with a dot (.) as hidden files.' },
       { level: 3, title: 'Procedural Guidance', text: 'Check the manual or help for `ls` options that display hidden entries.' },
-      { level: 4, title: 'Bounded Example', text: 'Inspect `man ls` for the option that does not ignore entries starting with `.`.' }
+      { level: 4, title: 'Bounded Example', text: 'For example, passing `-a` to a command often stands for showing all items.' }
     ],
-    prohibitedDisclosures: ['.secret_config', '.secret_mission', 'FLAG{hidden_files_revealed}', 'cat .secret_config'],
+    prohibitedDisclosures: ['.secret_config', 'FLAG{hidden_files_revealed}', 'cat .secret_config'],
     taskType: 'training',
     aiDisabled: false,
     safeResetProcedure: 'cd /home/cadet',
@@ -112,21 +91,11 @@ const RAW_SERVER_TASKS: Level[] = [
   {
     id: 3,
     taskId: 'TASK-003',
-    taskDefinitionVersion: '5.0.0',
+    taskDefinitionVersion: '2.0.0',
     title: 'Environment Variable',
     description: "We cannot find the key in any file on disk. It appears the developer left the secret resident in the shell's memory.",
     difficulty: Difficulty.EASY,
-    objective: 'Inspect the current shell environment variables to locate the exported secret token.',
-    studentTask: 'Examine the active shell environment variables in your session and recover the stored token.',
-    goal: 'List the current process environment variables and identify the variable holding the verification token.',
-    context: 'Processes in Linux inherit key-value environment variables from their parent shell. Developers sometimes store sensitive tokens in environment variables rather than writing them to disk files.',
-    successEvidence: 'Terminal output displaying the active shell environment variables and the verification token, followed by flag submission.',
-    howToWork: DEFAULT_HOW_TO_WORK,
-    constraints: [
-      'Working directory: /home/cadet',
-      'Offline isolated sandbox (no external internet access)',
-      'Standard user account (sudo privileges disabled)'
-    ],
+    objective: 'Recover the secret key stored in the session environment.',
     flag: 'FLAG{env_vars_insecure}',
     systemContext: `
       User: cadet
@@ -135,11 +104,11 @@ const RAW_SERVER_TASKS: Level[] = [
     `,
     hints: [
       'Where does the shell store global variables?',
-      'Which built-in or standard commands display active environment variables?'
+      "Is there a command to print the 'env'ironment?"
     ],
     clo: 'CLO-3: Shell environment variables, session state inspection, and credential handling.',
     taskDomain: 'troubleshooting',
-    expectedEvidence: 'Environment dump showing the SECRET_KEY variable and its assigned token value.',
+    expectedEvidence: 'Environment dump showing SECRET_KEY=FLAG{env_vars_insecure}.',
     expectedWarrant: 'Environment variables are held in process memory and can be inspected via env, printenv, or echo.',
     acceptableAlternativePaths: ['env', 'printenv', 'printenv SECRET_KEY', 'echo $SECRET_KEY'],
     commonMisconceptions: ['Searching disk files when variables exist in memory'],
@@ -160,21 +129,11 @@ const RAW_SERVER_TASKS: Level[] = [
   {
     id: 4,
     taskId: 'TASK-004',
-    taskDefinitionVersion: '5.0.0',
+    taskDefinitionVersion: '2.0.0',
     title: 'Needle in a Haystack',
-    description: "A critical event occurred, but it's buried inside the system logs.",
+    description: "A critical event occurred, but it's buried inside the system logs. We know the event is tagged with 'CRITICAL'.",
     difficulty: Difficulty.MEDIUM,
-    objective: 'Search the system log file to isolate the critical diagnostic record.',
-    studentTask: 'Filter the system log file in `/var/logs` (or `var/log`) to find the critical event entry.',
-    goal: 'Locate the specific log line recording a critical event without manually reading every routine line.',
-    context: 'Production log files often contain thousands of routine status lines. System administrators rely on command-line pattern-matching utilities to filter text streams for specific severity tags.',
-    successEvidence: 'Terminal output showing pattern-filtered log lines containing the critical entry and verification token.',
-    howToWork: DEFAULT_HOW_TO_WORK,
-    constraints: [
-      'Working directory: /home/cadet',
-      'Offline isolated sandbox (use local documentation such as man or --help)',
-      'Standard user account (sudo privileges disabled)'
-    ],
+    objective: "Locate the log entry tagged 'CRITICAL' within the system logs directory.",
     flag: 'FLAG{grep_is_powerful}',
     systemContext: `
       User: cadet
@@ -211,21 +170,11 @@ const RAW_SERVER_TASKS: Level[] = [
   {
     id: 5,
     taskId: 'TASK-005',
-    taskDefinitionVersion: '5.0.0',
+    taskDefinitionVersion: '2.0.0',
     title: 'Internal Communications',
     description: 'There is a web service running on this machine, but it is not exposed to the outside internet. You must access it from within the server itself.',
     difficulty: Difficulty.HARD,
-    objective: 'Identify and query the internal loopback service from the command line.',
-    studentTask: 'Inspect local network service bindings or query the internal loopback HTTP endpoint on port 8080.',
-    goal: 'Retrieve the response payload from the internal loopback service.',
-    context: 'Services bound to the loopback address (`127.0.0.1` or `localhost`) are accessible only to processes running on the same machine. Command-line HTTP and socket inspection tools allow operators to diagnose local services without a graphical browser.',
-    successEvidence: 'Terminal output showing the local service response or socket state containing the verification token.',
-    howToWork: DEFAULT_HOW_TO_WORK,
-    constraints: [
-      'Working directory: /home/cadet',
-      'Loopback networking only (external internet disabled)',
-      'Standard user account (sudo privileges disabled)'
-    ],
+    objective: 'Retrieve the flag from the internal web service.',
     flag: 'FLAG{curl_local_services}',
     systemContext: `
       User: cadet
@@ -247,7 +196,7 @@ const RAW_SERVER_TASKS: Level[] = [
       { level: 0, title: 'Clarification', text: 'What network port and protocol are you attempting to communicate with?' },
       { level: 1, title: 'Socratic Inquiry', text: 'Which CLI command allows you to transfer data from a URL or web endpoint?' },
       { level: 2, title: 'Conceptual Reminder', text: 'Web servers respond to HTTP GET requests sent to their host and port.' },
-      { level: 3, title: 'Procedural Guidance', text: 'Look into `curl` to issue a request to the local loopback port.' },
+      { level: 3, title: 'Procedural Guidance', text: 'Look into `curl` to issue a request to `localhost:8080`.' },
       { level: 4, title: 'Bounded Example', text: 'Example syntax: `curl http://localhost:<port>`.' }
     ],
     prohibitedDisclosures: ['FLAG{curl_local_services}', 'curl localhost:8080'],
@@ -260,21 +209,11 @@ const RAW_SERVER_TASKS: Level[] = [
   {
     id: 6,
     taskId: 'TASK-006',
-    taskDefinitionVersion: '5.0.0',
+    taskDefinitionVersion: '2.0.0',
     title: 'Encoded Artifact',
-    description: 'An artifact in your working directory contains text that has been obfuscated using a common ASCII encoding scheme.',
+    description: "We intercepted a suspicious file named 'secret.b64'. The content appears to be obfuscated using a common encoding scheme.",
     difficulty: Difficulty.MEDIUM,
-    objective: 'Inspect the encoded artifact and decode its contents to plaintext.',
-    studentTask: 'Examine the encoded file in your home directory and reverse its encoding to read the plaintext token.',
-    goal: 'Identify the encoding format from observable file evidence and transform the encoded text back into readable ASCII.',
-    context: 'Data is frequently encoded into printable ASCII characters for safe transport across text-only channels. Unlike encryption, standard encoding schemes require no secret key and can be reversed with standard command-line filters.',
-    successEvidence: 'Terminal output showing inspection of the encoded artifact and its decoded plaintext verification token.',
-    howToWork: DEFAULT_HOW_TO_WORK,
-    constraints: [
-      'Working directory: /home/cadet',
-      'Offline isolated sandbox (use local documentation such as man or --help)',
-      'Standard user account (sudo privileges disabled)'
-    ],
+    objective: "Decode the contents of the 'secret.b64' file.",
     flag: 'FLAG{pipes_and_decoding}',
     systemContext: `
       User: cadet
@@ -287,7 +226,7 @@ const RAW_SERVER_TASKS: Level[] = [
     `,
     hints: [
       'The file extension gives a hint about the encoding.',
-      "Consult the manual page for the encoding utility to see how to decode."
+      "You might need to 'decode' it."
     ],
     clo: 'CLO-6: Standard streams, Unix pipes (|), and data transformation utilities.',
     taskDomain: 'troubleshooting',
@@ -296,13 +235,13 @@ const RAW_SERVER_TASKS: Level[] = [
     acceptableAlternativePaths: ['cat secret.b64 | base64 -d', 'base64 -d secret.b64', 'base64 --decode secret.b64'],
     commonMisconceptions: ['Assuming base64 is an encryption cipher requiring a private key'],
     approvedHintProgression: [
-      { level: 0, title: 'Clarification', text: 'What format is indicated by the file extension and character padding?' },
+      { level: 0, title: 'Clarification', text: 'What format is indicated by the .b64 file extension?' },
       { level: 1, title: 'Socratic Inquiry', text: 'How do Unix pipelines connect stdout of one program to stdin of another?' },
-      { level: 2, title: 'Conceptual Reminder', text: 'The `base64` utility has an option to decode input.' },
-      { level: 3, title: 'Procedural Guidance', text: 'Check `man base64` for the decode flag and pass the encoded file to it.' },
-      { level: 4, title: 'Bounded Example', text: 'Example: `base64 <decode-option> <filename>`.' }
+      { level: 2, title: 'Conceptual Reminder', text: 'The `base64` utility has a decode flag (-d).' },
+      { level: 3, title: 'Procedural Guidance', text: 'Pipe the contents of the file into `base64 -d`.' },
+      { level: 4, title: 'Bounded Example', text: 'Example: `cat file.b64 | base64 -d`.' }
     ],
-    prohibitedDisclosures: ['FLAG{pipes_and_decoding}', 'base64 -d secret.b64', 'cat secret.b64 | base64 -d'],
+    prohibitedDisclosures: ['FLAG{pipes_and_decoding}', 'base64 -d secret.b64'],
     taskType: 'training',
     aiDisabled: false,
     safeResetProcedure: 'cd /home/cadet',
@@ -312,21 +251,11 @@ const RAW_SERVER_TASKS: Level[] = [
   {
     id: 7,
     taskId: 'TASK-007',
-    taskDefinitionVersion: '5.0.0',
+    taskDefinitionVersion: '2.0.0',
     title: 'Access Denied',
-    description: "The target file is locked down with administrative permissions. Your standard account cannot read it directly without delegated elevation.",
+    description: "The target file is locked down in the administrator's home directory. Your standard account cannot read it directly.",
     difficulty: Difficulty.MEDIUM,
-    objective: 'Inspect file permissions and authorized privilege delegation to access the restricted artifact.',
-    studentTask: 'Determine why direct access fails, inspect your delegated administrative privileges, and read the restricted artifact.',
-    goal: 'Verify ownership, permissions, or `sudo` delegation rules and use authorized privilege elevation to retrieve the token.',
-    context: 'Linux enforces discretionary access control through user/group ownership and permission bits, while `sudo` allows fine-grained delegation of administrative commands. When access fails, administrators check both file permissions and their authorized `sudo` policy.',
-    successEvidence: 'Terminal evidence of permission/delegation inspection and authorized retrieval of the verification token.',
-    howToWork: DEFAULT_HOW_TO_WORK,
-    constraints: [
-      'Working directory: /home/cadet',
-      'Offline isolated sandbox (no external internet access)',
-      'Task-specific capability: authorized sudo delegation enabled for user cadet'
-    ],
+    objective: "Read the flag located in the root user's home directory.",
     flag: 'FLAG{sudo_power_unlocked}',
     systemContext: `
       User: cadet
@@ -339,7 +268,7 @@ const RAW_SERVER_TASKS: Level[] = [
     `,
     hints: [
       "What prefix allows you to run a command as the 'super user'?",
-      "Which option in `man sudo` lists your authorized commands?"
+      "Where is the root user's home directory?"
     ],
     clo: 'CLO-7: POSIX permissions, discretionary access control, and superuser delegation (sudo).',
     taskDomain: 'permissions',
@@ -348,11 +277,11 @@ const RAW_SERVER_TASKS: Level[] = [
     acceptableAlternativePaths: ['sudo cat /root/flag.txt', 'sudo head /root/flag.txt', 'sudo -s'],
     commonMisconceptions: ['Attempting chmod without sudo privileges'],
     approvedHintProgression: [
-      { level: 0, title: 'Clarification', text: 'What error message did the operating system return when you accessed the target file?' },
-      { level: 1, title: 'Socratic Inquiry', text: 'Who owns the restricted file, and how can you check what elevated privileges your account has?' },
-      { level: 2, title: 'Conceptual Reminder', text: 'The `sudo` command executes programs with delegated administrative security privileges.' },
-      { level: 3, title: 'Procedural Guidance', text: 'Inspect your delegated privileges with `sudo -l` or prefix your inspection command with `sudo`.' },
-      { level: 4, title: 'Bounded Example', text: 'Example: `sudo <command> <restricted_path>`.' }
+      { level: 0, title: 'Clarification', text: 'What error message did the operating system return when you accessed /root/flag.txt?' },
+      { level: 1, title: 'Socratic Inquiry', text: 'Who owns /root/flag.txt, and how can you elevate privileges to read it?' },
+      { level: 2, title: 'Conceptual Reminder', text: 'The `sudo` command executes programs with superuser security privileges.' },
+      { level: 3, title: 'Procedural Guidance', text: 'Prefix your read command with `sudo`.' },
+      { level: 4, title: 'Bounded Example', text: 'Example: `sudo cat /path/to/root_file`.' }
     ],
     prohibitedDisclosures: ['FLAG{sudo_power_unlocked}', 'sudo cat /root/flag.txt'],
     taskType: 'transfer',
@@ -364,21 +293,11 @@ const RAW_SERVER_TASKS: Level[] = [
   {
     id: 8,
     taskId: 'TASK-008',
-    taskDefinitionVersion: '5.0.0',
+    taskDefinitionVersion: '2.0.0',
     title: 'Lost Data',
-    description: 'An important backup artifact was saved somewhere inside a multi-level directory tree, and we do not know the exact subfolder.',
+    description: "A file named 'lost_flag.txt' was saved somewhere inside the '/var' directory tree, but we don't know the exact subfolder.",
     difficulty: Difficulty.MEDIUM,
-    objective: 'Traverse the directory hierarchy to locate the misplaced artifact and read its contents.',
-    studentTask: 'Search recursively across the target directory tree to locate the misplaced artifact and inspect its contents.',
-    goal: 'Use a recursive directory search utility to identify the exact file path and read the verification token.',
-    context: 'Manually changing directories across deeply nested filesystem trees is slow and error-prone. Linux provides dedicated traversal utilities that search directory hierarchies by filename, file type, or metadata attributes.',
-    successEvidence: 'Terminal output showing recursive search discovery of the file path and inspection of its verification token.',
-    howToWork: DEFAULT_HOW_TO_WORK,
-    constraints: [
-      'Working directory: /home/cadet',
-      'Offline isolated sandbox (use local documentation such as man or --help)',
-      'Standard user account (sudo privileges disabled)'
-    ],
+    objective: "Locate the file 'lost_flag.txt' hidden somewhere in the '/var' directory.",
     flag: 'FLAG{find_command_expert}',
     systemContext: `
       User: cadet
@@ -391,7 +310,7 @@ const RAW_SERVER_TASKS: Level[] = [
     `,
     hints: [
       "There is a command specifically named for 'finding' things.",
-      "Consult `man find` to see how to match entries by name or type."
+      "You can search by 'name'."
     ],
     clo: 'CLO-8: Hierarchical filesystem traversal and pattern-based search using find.',
     taskDomain: 'search',
@@ -401,12 +320,12 @@ const RAW_SERVER_TASKS: Level[] = [
     commonMisconceptions: ['Trying to manually cd into every directory under /var'],
     approvedHintProgression: [
       { level: 0, title: 'Clarification', text: 'What command are you using to search across nested subdirectories?' },
-      { level: 1, title: 'Socratic Inquiry', text: 'Which utility traverses directory hierarchies searching by filename or file type?' },
-      { level: 2, title: 'Conceptual Reminder', text: 'The `find` utility accepts a starting directory and search expressions.' },
-      { level: 3, title: 'Procedural Guidance', text: 'Consult `man find` for the expression that matches by name or file type.' },
-      { level: 4, title: 'Bounded Example', text: 'Example syntax: `find <starting-dir> -name <pattern>`.' }
+      { level: 1, title: 'Socratic Inquiry', text: 'Which utility traverses directory hierarchies searching by filename?' },
+      { level: 2, title: 'Conceptual Reminder', text: 'The `find` utility accepts a starting directory and search criteria like `-name`.' },
+      { level: 3, title: 'Procedural Guidance', text: 'Run `find /var -name lost_flag.txt` to discover the exact location.' },
+      { level: 4, title: 'Bounded Example', text: 'Example syntax: `find /starting/dir -name filename.ext`.' }
     ],
-    prohibitedDisclosures: ['FLAG{find_command_expert}', '.shadow_copy.bak', 'find /var -name lost_flag.txt'],
+    prohibitedDisclosures: ['FLAG{find_command_expert}', 'find /var -name lost_flag.txt'],
     taskType: 'training',
     aiDisabled: false,
     isPostTest: false,
@@ -415,20 +334,3 @@ const RAW_SERVER_TASKS: Level[] = [
     inclusionStatus: true
   }
 ];
-
-export const INITIAL_RESEARCH_TASKS: Level[] = RAW_SERVER_TASKS.map(t => {
-  const clientMatch = INITIAL_LEVELS.find(c => c.id === t.id);
-  return {
-    ...t,
-    description: clientMatch?.description || t.description,
-    objective: clientMatch?.objective || t.objective,
-    studentTask: clientMatch?.studentTask || t.studentTask,
-    goal: clientMatch?.goal || t.goal,
-    context: clientMatch?.context || t.context,
-    successEvidence: clientMatch?.successEvidence || t.successEvidence,
-    howToWork: clientMatch?.howToWork || t.howToWork || DEFAULT_HOW_TO_WORK,
-    constraints: clientMatch?.constraints || t.constraints || ['Directory: /home/cadet', 'Offline sandbox']
-  };
-});
-
-export const SERVER_TASKS = INITIAL_RESEARCH_TASKS;

@@ -1,5 +1,5 @@
 # Formal Verification Appendix & Runtime Evidence Report
-**Socratic Shell & AI Tutor Evaluation Research Harness**  
+**Remix Linux Gym & AI Tutor Evaluation Research Harness**  
 **Protocol Version**: 1.0.0 (Research Baseline Freeze 1) | **Date**: October 2, 2026 | **Environment**: Debian GNU/Linux 12 (bookworm) / Node.js v22.23.2
 
 ---

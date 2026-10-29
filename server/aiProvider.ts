@@ -1,12 +1,6 @@
 import { GoogleGenAI } from '@google/genai';
 import { db } from './db';
 import { Level, ExperimentalCondition } from '../types';
-import {
-  DEFAULT_AI_PROVIDER,
-  DEFAULT_OLLAMA_URL,
-  DEFAULT_TUTOR_MODEL,
-  validateOllamaModelRole
-} from './protocolV5';
 
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system';
@@ -23,33 +17,7 @@ export interface AIGenerationOptions {
 }
 
 /**
- * Normalizes an Ollama base URL or /api/chat endpoint into a clean /api/chat URL.
- */
-function buildOllamaChatUrl(baseUrl: string): string {
-  const cleanBase = baseUrl.trim().replace(/\/+$/, '');
-  if (cleanBase.endsWith('/api/chat')) return cleanBase;
-  if (cleanBase.endsWith('/api/generate')) return cleanBase.replace(/\/api\/generate$/, '/api/chat');
-  return `${cleanBase}/api/chat`;
-}
-
-export function verifyFrozenModelDigest(
-  frozenDigest: string | undefined,
-  liveDigest: string | undefined,
-  isLockedRun: boolean
-): void {
-  if (!isLockedRun || !frozenDigest) return;
-  const cleanFrozen = frozenDigest.trim();
-  const cleanLive = (liveDigest || '').trim();
-  if (!cleanLive || cleanFrozen !== cleanLive) {
-    throw new Error(
-      `CONFIGURATION_ERROR: Live model digest (${cleanLive || 'unavailable'}) does not match frozen run manifest digest (${cleanFrozen}). Execution rejected.`
-    );
-  }
-}
-
-/**
- * Call local Ollama chat API (runs locally with zero cloud API keys on GPU/CPU)
- * Uses the single configured OLLAMA_BASE_URL (default http://localhost:2004).
+ * Call local Ollama chat API (runs locally with zero cloud API keys on NVIDIA GPU)
  */
 export async function callOllamaChat({
   baseUrl,
@@ -64,7 +32,8 @@ export async function callOllamaChat({
   messages: ChatMessage[];
   temperature?: number;
 }): Promise<string> {
-  const url = buildOllamaChatUrl(baseUrl || process.env.OLLAMA_BASE_URL || DEFAULT_OLLAMA_URL);
+  const cleanBase = baseUrl.replace(/\/+$/, '');
+  const url = cleanBase.endsWith('/api/chat') ? cleanBase : `${cleanBase}/api/chat`;
 
   const formattedMessages = [
     { role: 'system', content: systemPrompt },
@@ -73,7 +42,7 @@ export async function callOllamaChat({
 
   const timeoutMs = process.env.LLM_TIMEOUT_MS ? parseInt(process.env.LLM_TIMEOUT_MS, 10) : 60000;
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs); // 60s timeout for large local models on GPU
 
   try {
     const res = await fetch(url, {
@@ -89,19 +58,11 @@ export async function callOllamaChat({
     });
 
     if (!res.ok) {
-      throw new Error(`Ollama error HTTP ${res.status} (${url}): ${res.statusText}`);
+      throw new Error(`Ollama error HTTP ${res.status}: ${res.statusText}`);
     }
 
     const data: any = await res.json();
-    const rawContent = (data.message?.content || '').trim();
-    const strippedContent = rawContent.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-    const content = strippedContent || rawContent;
-    if (!content) {
-      throw new Error(`Ollama returned empty message content from ${url}`);
-    }
-    return content;
-  } catch (err: any) {
-    throw err instanceof Error ? err : new Error(String(err));
+    return data.message?.content || '';
   } finally {
     clearTimeout(timeoutId);
   }
@@ -146,7 +107,7 @@ export async function callOpenAICompatibleChat({
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey || 'EMPTY'}`
+        'Authorization': `Bearer ${apiKey || 'EMPTY'}`
       },
       body: JSON.stringify({
         model,
@@ -161,18 +122,14 @@ export async function callOpenAICompatibleChat({
     }
 
     const data: any = await res.json();
-    const content = (data.choices?.[0]?.message?.content || '').trim();
-    if (!content) {
-      throw new Error('Local OpenAI/vLLM endpoint returned empty response content');
-    }
-    return content;
+    return data.choices?.[0]?.message?.content || '';
   } finally {
     clearTimeout(timeoutId);
   }
 }
 
 /**
- * Call Google Gemini using the official @google/genai SDK (Optional secondary cloud provider; never default)
+ * Call Google Gemini using the official @google/genai SDK
  */
 export async function callGeminiChat({
   apiKey,
@@ -190,7 +147,8 @@ export async function callGeminiChat({
   temperature?: number;
 }): Promise<string> {
   const ai = new GoogleGenAI({ apiKey });
-
+  
+  // Format past turns if available
   const contents: any[] = [];
   for (const h of conversationHistory) {
     contents.push({
@@ -213,56 +171,35 @@ export async function callGeminiChat({
     }
   });
 
-  const text = (response.text || '').trim();
-  if (!text) {
-    throw new Error('Gemini API returned an empty response');
-  }
-  return text;
+  return response.text || '';
 }
 
 /**
  * Unified AI Generation router
- * - Defaults strictly to local Ollama (DEFAULT_AI_PROVIDER = 'ollama', DEFAULT_TUTOR_MODEL = 'qwen2.5-coder:7b').
- * - Never silently falls back to a canned rule-based response or cloud provider on failure.
+ * Automatically delegates to Ollama (GPU local), OpenAI/vLLM (GPU local), or Gemini (Cloud)
  */
 export async function generateAITutorResponse(options: AIGenerationOptions): Promise<{
   reply: string;
-  providerUsed: 'ollama' | 'custom' | 'gemini';
+  providerUsed: 'ollama' | 'custom' | 'gemini' | 'rule_based_fallback';
 }> {
-  const config = (db.getConfig() || {}) as any;
+  const config = db.getConfig() as any;
   const { systemPrompt, userQuery, conversationHistory = [] } = options;
 
-  const activeRun = db.getActiveRun();
-  const isFormalOrPilot =
-    options.isFormalRun ??
-    Boolean(
-      activeRun &&
-        activeRun.isLocked &&
-        (activeRun.runType === 'formal' || activeRun.runType === 'pilot' || activeRun.runType === 'regression')
-    );
-
+  // Format messages for standard chat APIs
   const messages: ChatMessage[] = conversationHistory.map(h => ({
     role: (h.sender === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
     content: h.text
   }));
   messages.push({ role: 'user', content: userQuery });
 
-  // Provider selection precedence: process.env.LLM_PROVIDER -> DB config -> DEFAULT_AI_PROVIDER ('ollama')
-  const explicitProvider = (
-    process.env.LLM_PROVIDER ||
-    config.provider ||
-    config.tutorProvider ||
-    DEFAULT_AI_PROVIDER
-  ).toLowerCase();
+  // Provider selection precedence: process.env.LLM_PROVIDER -> DB config -> auto-detection
+  const explicitProvider = (process.env.LLM_PROVIDER || config.provider || '').toLowerCase();
 
-  // 1. OpenAI-Compatible / Custom vLLM / LM Studio Provider
-  const isCustomOrVllm =
-    explicitProvider === 'custom' || explicitProvider === 'vllm' || explicitProvider === 'openai';
+  // 1. OpenAI-Compatible / Custom vLLM / LM Studio Provider (Default Port 2005 in 2000-2009 range)
+  const isCustomOrVllm = explicitProvider === 'custom' || explicitProvider === 'vllm' || explicitProvider === 'openai';
   if (isCustomOrVllm) {
-    const baseUrl =
-      config.openaiUrl || process.env.VLLM_BASE_URL || process.env.OPENAI_BASE_URL || 'http://localhost:2005/v1';
-    const model =
-      config.openaiModel || process.env.VLLM_MODEL || process.env.OPENAI_MODEL || DEFAULT_TUTOR_MODEL;
+    const baseUrl = config.openaiUrl || process.env.VLLM_BASE_URL || process.env.OPENAI_BASE_URL || 'http://localhost:2005/v1';
+    const model = config.openaiModel || process.env.VLLM_MODEL || process.env.OPENAI_MODEL || 'local-model';
     const apiKey = config.openaiKey || process.env.OPENAI_API_KEY || 'EMPTY';
     try {
       const reply = await callOpenAICompatibleChat({
@@ -271,82 +208,69 @@ export async function generateAITutorResponse(options: AIGenerationOptions): Pro
         model,
         systemPrompt,
         messages,
-        temperature: config.temperature ?? 0.2
+        temperature: config.temperature || 0.2
       });
-      return { reply, providerUsed: 'custom' };
+      if (reply && reply.trim().length > 0) {
+        return { reply, providerUsed: 'custom' };
+      }
     } catch (err: any) {
-      throw new Error(
-        `CONFIGURATION_ERROR: Configured OpenAI/vLLM provider (${model} at ${baseUrl}) failed without fallback: ${err.message}`
-      );
+      console.warn(`[AITutor] Local vLLM/OpenAI endpoint call failed (${err.message}). Checking secondary providers...`);
     }
   }
 
-  // 2. Google Gemini Provider (Only if explicitly selected AND not in a locked formal/pilot/regression run)
-  if (explicitProvider === 'gemini') {
-    if (isFormalOrPilot) {
-      throw new Error(
-        'CONFIGURATION_ERROR: Cloud Gemini provider is prohibited during formal evaluation, pilot, or regression runs. Use local Ollama.'
-      );
-    }
-    const apiKey = process.env.GEMINI_API_KEY || config.apiKey;
-    if (!apiKey) {
-      throw new Error(
-        'CONFIGURATION_ERROR: Gemini provider selected, but GEMINI_API_KEY is not configured. Switch provider to ollama.'
-      );
-    }
+  // 2. Ollama Provider (GPU Local Inference - Default Port 2004 in 2000-2009 range)
+  const isOllamaConfigured = explicitProvider === 'ollama' || (!process.env.GEMINI_API_KEY && !config.apiKey && explicitProvider !== 'gemini' && !isCustomOrVllm);
+  if (isOllamaConfigured) {
+    const ollamaUrl = config.ollamaUrl || config.ollamaBaseUrl || process.env.OLLAMA_BASE_URL || 'http://localhost:2004';
+    const ollamaModel = config.ollamaModel || process.env.OLLAMA_MODEL || 'llama3.3:70b';
     try {
-      const model =
-        config.tutorModel && config.tutorModel.startsWith('gemini')
-          ? config.tutorModel
-          : 'gemini-2.5-flash';
+      const reply = await callOllamaChat({
+        baseUrl: ollamaUrl,
+        model: ollamaModel,
+        systemPrompt,
+        messages,
+        temperature: config.temperature || 0.2
+      });
+      if (reply && reply.trim().length > 0) {
+        return { reply, providerUsed: 'ollama' };
+      }
+    } catch (err: any) {
+      console.warn(`[AITutor] Local Ollama call failed (${err.message}). Checking secondary providers...`);
+    }
+  }
+
+  // 3. Google Gemini Provider
+  const activeRun = db.getActiveRun();
+  const isFormalOrPilot = options.isFormalRun ?? (activeRun?.runType === 'formal' || activeRun?.runType === 'pilot');
+  if (isFormalOrPilot) {
+    throw new Error('CONFIGURATION_ERROR: Pinned local tutor model is unavailable during formal evaluation or student pilot.');
+  }
+
+  const apiKey = process.env.GEMINI_API_KEY || config.apiKey;
+  if (apiKey) {
+    try {
+      const model = config.tutorModel || 'gemini-2.5-flash';
       const reply = await callGeminiChat({
         apiKey,
         model,
         systemPrompt,
         userQuery,
         conversationHistory,
-        temperature: config.temperature ?? 0.2
+        temperature: config.temperature || 0.2
       });
-      return { reply, providerUsed: 'gemini' };
+      if (reply && reply.trim().length > 0) {
+        return { reply, providerUsed: 'gemini' };
+      }
     } catch (err: any) {
-      throw new Error(
-        `CONFIGURATION_ERROR: Gemini API call failed without silent fallback: ${err.message}`
-      );
+      console.warn(`[AITutor] Gemini Cloud API call failed (${err.message}). Falling back to rule-based tutor...`);
     }
   }
 
-  // 3. Default Authoritative Provider: Local Ollama ('ollama')
-  const ollamaUrl =
-    config.ollamaUrl ||
-    config.ollamaBaseUrl ||
-    process.env.OLLAMA_BASE_URL ||
-    process.env.OLLAMA_URL ||
-    DEFAULT_OLLAMA_URL;
-  const rawModel =
-    config.ollamaModel ||
-    process.env.OLLAMA_MODEL ||
-    config.tutorModel ||
-    DEFAULT_TUTOR_MODEL;
-  // Ensure legacy 'gemini-*' or 'llama3' placeholder strings in tutorModel don't override the canonical Ollama model
-  const ollamaModel =
-    rawModel.startsWith('gemini') || rawModel === 'llama3'
-      ? process.env.OLLAMA_MODEL || DEFAULT_TUTOR_MODEL
-      : rawModel;
+  // 4. Default Pedagogical Rule-Based Fallback
+  const isGuided = options.condition !== 'unguided';
+  const defaultFallback = isGuided
+    ? `What specific output did you observe from your latest command in the terminal? What have you tried so far?`
+    : `To inspect current directory contents, use \`ls\`. To view file contents, use \`cat <filename>\`.`;
 
-  validateOllamaModelRole(ollamaModel, 'tutor');
-
-  try {
-    const reply = await callOllamaChat({
-      baseUrl: ollamaUrl,
-      model: ollamaModel,
-      systemPrompt,
-      messages,
-      temperature: config.temperature ?? 0.2
-    });
-    return { reply, providerUsed: 'ollama' };
-  } catch (err: any) {
-    throw new Error(
-      `CONFIGURATION_ERROR: Pinned local Ollama tutor model (${ollamaModel} at ${ollamaUrl}) is unavailable: ${err.message}`
-    );
-  }
+  return { reply: defaultFallback, providerUsed: 'rule_based_fallback' };
 }

@@ -1,9 +1,9 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { INITIAL_LEVELS } from '../constants';
 import {
   FormalRun,
+  ResearchConfiguration,
   TelemetryEvent,
   TestCase,
   Level,
@@ -16,28 +16,8 @@ import {
   TelemetryValidationReport,
   ResearchLog,
   User,
-  AIConfig,
-  GroundTruthRecord,
-  SequesteredCaseRecord,
-  CaseExecutionRecord,
-  TutorInteractionRecord,
-  ExecutionIntegrityReport,
-  ContainerSessionRecord,
-  TerminalCommandRecord,
-  TerminalOutputRecord,
-  RegressionComparisonRecord
+  AIConfig
 } from '../types';
-import {
-  DEFAULT_AI_PROVIDER,
-  DEFAULT_OLLAMA_URL,
-  DEFAULT_TUTOR_MODEL,
-  DEFAULT_GUARD_MODEL,
-  validateOllamaModelRole
-} from './protocolV5';
-import {
-  buildInitialGroundTruthRecords,
-  getCanonicalSequesteredCases
-} from './studyInstrumentation';
 
 export interface DatabaseState {
   version: string;
@@ -46,26 +26,14 @@ export interface DatabaseState {
   formal_runs: FormalRun[];
   telemetry_events: TelemetryEvent[];
   test_cases: TestCase[];
-  ground_truth: GroundTruthRecord[];
-  sequestered_cases: SequesteredCaseRecord[];
-  knownCaseRegressionComplete: boolean;
-  case_executions: CaseExecutionRecord[];
-  interactions: TutorInteractionRecord[];
-  integrity_reports: ExecutionIntegrityReport[];
-  container_sessions: ContainerSessionRecord[];
-  terminal_commands: TerminalCommandRecord[];
-  terminal_outputs: TerminalOutputRecord[];
-  regression_comparisons: RegressionComparisonRecord[];
   cew_submissions: CEWSubmission[];
   cew_scores: CEWScore[];
   expert_reviews: ExpertReview[];
-  expert_reviews_history: ExpertReview[];
-  exportedReviewIds: string[];
   defects: DefectRecord[];
   guardrail_events: GuardrailEventRecord[];
   guardrail_decisions?: GuardrailDecisionRecord[];
   telemetry_validations: TelemetryValidationReport[];
-  research_logs: ResearchLog[];
+  research_logs: ResearchLog[]; // Legacy compatibility array
   config: AIConfig | null;
   activeRunId: string | null;
 }
@@ -74,8 +42,6 @@ export class DatabaseManager {
   private dataDir: string;
   private jsonPath: string;
   private jsonlPath: string;
-  private cmdJsonlPath: string;
-  private outJsonlPath: string;
   private state: DatabaseState;
   private writeLock: Promise<void> = Promise.resolve();
   private sessionSequences: Map<string, number> = new Map();
@@ -107,8 +73,6 @@ export class DatabaseManager {
     this.dataDir = path.join(process.cwd(), 'data');
     this.jsonPath = path.join(this.dataDir, 'research_lab.json');
     this.jsonlPath = path.join(this.dataDir, 'telemetry_events_append_only.jsonl');
-    this.cmdJsonlPath = path.join(this.dataDir, 'terminal_commands_append_only.jsonl');
-    this.outJsonlPath = path.join(this.dataDir, 'terminal_outputs_append_only.jsonl');
 
     if (!fs.existsSync(this.dataDir)) {
       fs.mkdirSync(this.dataDir, { recursive: true });
@@ -131,7 +95,7 @@ export class DatabaseManager {
       console.log(`Please log in and update your administrative password immediately.`);
       console.log(`===================================================================\n`);
     } else if (!adminPass) {
-      adminPass = 'admin';
+      adminPass = 'admin'; // Dev default only
     }
 
     const defaultUsers: Record<string, { user: User; passwordHash: string }> = {
@@ -153,109 +117,38 @@ export class DatabaseManager {
     }
 
     return {
-      version: '3.0.0',
+      version: '2.0.0',
       users: defaultUsers,
       levels: [],
       formal_runs: [],
       telemetry_events: [],
       test_cases: [],
-      ground_truth: [],
-      sequestered_cases: getCanonicalSequesteredCases(),
-      knownCaseRegressionComplete: false,
-      case_executions: [],
-      interactions: [],
-      integrity_reports: [],
-      container_sessions: [],
-      terminal_commands: [],
-      terminal_outputs: [],
-      regression_comparisons: [],
       cew_submissions: [],
       cew_scores: [],
       expert_reviews: [],
-      expert_reviews_history: [],
-      exportedReviewIds: [],
       defects: [],
       guardrail_events: [],
       guardrail_decisions: [],
       telemetry_validations: [],
       research_logs: [],
       config: {
-        provider: DEFAULT_AI_PROVIDER,
-        ollamaUrl: process.env.OLLAMA_BASE_URL || process.env.OLLAMA_URL || DEFAULT_OLLAMA_URL,
-        ollamaModel: process.env.OLLAMA_MODEL || DEFAULT_TUTOR_MODEL,
-        llamaGuardModel: process.env.LLAMA_GUARD_MODEL || DEFAULT_GUARD_MODEL,
-        enableLlamaGuard: true,
-        tutorProvider: DEFAULT_AI_PROVIDER,
-        tutorModel: process.env.OLLAMA_MODEL || DEFAULT_TUTOR_MODEL,
-        evaluatorProvider: DEFAULT_AI_PROVIDER,
-        evaluatorModel: process.env.OLLAMA_MODEL || DEFAULT_TUTOR_MODEL,
+        provider: 'gemini',
+        ollamaUrl: process.env.OLLAMA_BASE_URL ? `${process.env.OLLAMA_BASE_URL}/api/chat` : 'http://localhost:2004/api/chat',
+        ollamaModel: 'llama3',
+        tutorProvider: 'gemini',
+        tutorModel: 'gemini-3-flash-preview',
+        evaluatorProvider: 'gemini',
+        evaluatorModel: 'gemini-3-flash-preview',
         sameModelAsTutor: true,
         temperature: 0.1,
         topP: 0.95,
         maxTokens: 512,
         seed: 42,
-        deploymentMode: 'local_llm',
-        executionEnvironment: 'native_pty'
+        deploymentMode: 'hosted_model',
+        executionEnvironment: 'ai_simulated'
       },
       activeRunId: null
     };
-  }
-
-  private normalizeConfigToOllamaDefault(cfg: any, defaultCfg: AIConfig): AIConfig {
-    if (!cfg) return defaultCfg;
-    const merged: AIConfig = { ...defaultCfg, ...cfg };
-    if (!merged.provider || merged.provider === 'gemini') {
-      merged.provider = DEFAULT_AI_PROVIDER;
-    }
-    if (!merged.tutorProvider || merged.tutorProvider === 'gemini') {
-      merged.tutorProvider = DEFAULT_AI_PROVIDER;
-    }
-    if (!merged.evaluatorProvider || merged.evaluatorProvider === 'gemini') {
-      merged.evaluatorProvider = DEFAULT_AI_PROVIDER;
-    }
-    if (
-      !merged.ollamaModel ||
-      merged.ollamaModel === 'llama3' ||
-      merged.ollamaModel === 'llama3.3:70b' ||
-      merged.ollamaModel.toLowerCase().includes('embed')
-    ) {
-      merged.ollamaModel = process.env.OLLAMA_MODEL || DEFAULT_TUTOR_MODEL;
-    }
-    if (
-      !merged.tutorModel ||
-      merged.tutorModel.startsWith('gemini') ||
-      merged.tutorModel === 'llama3' ||
-      merged.tutorModel === 'llama3.3:70b' ||
-      merged.tutorModel.toLowerCase().includes('embed')
-    ) {
-      merged.tutorModel = merged.ollamaModel || DEFAULT_TUTOR_MODEL;
-    }
-    if (
-      !merged.evaluatorModel ||
-      merged.evaluatorModel.startsWith('gemini') ||
-      merged.evaluatorModel === 'llama3' ||
-      merged.evaluatorModel === 'llama3.3:70b' ||
-      merged.evaluatorModel.toLowerCase().includes('embed')
-    ) {
-      merged.evaluatorModel = merged.ollamaModel || DEFAULT_TUTOR_MODEL;
-    }
-    if (
-      !merged.ollamaUrl ||
-      merged.ollamaUrl.includes('localhost:2004') ||
-      merged.ollamaUrl.includes('localhost:11434') ||
-      merged.ollamaUrl.endsWith('/api/chat') ||
-      merged.ollamaUrl.endsWith('/api/generate')
-    ) {
-      merged.ollamaUrl = (process.env.OLLAMA_BASE_URL || process.env.OLLAMA_URL || DEFAULT_OLLAMA_URL)
-        .replace(/\/+$/, '')
-        .replace(/\/api\/(chat|generate)$/i, '');
-    }
-    if (!merged.llamaGuardModel || merged.llamaGuardModel.toLowerCase().includes('embed')) {
-      merged.llamaGuardModel = process.env.LLAMA_GUARD_MODEL || DEFAULT_GUARD_MODEL;
-    }
-    merged.deploymentMode = 'local_llm';
-    merged.executionEnvironment = 'native_pty';
-    return merged;
   }
 
   private loadState(): DatabaseState {
@@ -268,26 +161,14 @@ export class DatabaseManager {
     try {
       const raw = fs.readFileSync(this.jsonPath, 'utf8');
       const parsed = JSON.parse(raw);
+      // Non-destructive merge with default schema
       const merged: DatabaseState = {
-        version: parsed.version || '3.0.0',
+        version: parsed.version || '2.0.0',
         users: parsed.users || defaultState.users,
-        levels: Array.isArray(parsed.levels) ? parsed.levels.filter((t: any) => t && t.id >= 1 && t.id <= 8) : [],
+        levels: Array.isArray(parsed.levels) ? parsed.levels : [],
         formal_runs: Array.isArray(parsed.formal_runs) ? parsed.formal_runs : [],
         telemetry_events: Array.isArray(parsed.telemetry_events) ? parsed.telemetry_events : [],
         test_cases: Array.isArray(parsed.test_cases) ? parsed.test_cases : [],
-        ground_truth: Array.isArray(parsed.ground_truth) ? parsed.ground_truth : [],
-        sequestered_cases:
-          Array.isArray(parsed.sequestered_cases) && parsed.sequestered_cases.length === 6
-            ? parsed.sequestered_cases
-            : getCanonicalSequesteredCases(),
-        knownCaseRegressionComplete: Boolean(parsed.knownCaseRegressionComplete),
-        case_executions: Array.isArray(parsed.case_executions) ? parsed.case_executions : [],
-        interactions: Array.isArray(parsed.interactions) ? parsed.interactions : [],
-        integrity_reports: Array.isArray(parsed.integrity_reports) ? parsed.integrity_reports : [],
-        container_sessions: Array.isArray(parsed.container_sessions) ? parsed.container_sessions : [],
-        terminal_commands: Array.isArray(parsed.terminal_commands) ? parsed.terminal_commands : [],
-        terminal_outputs: Array.isArray(parsed.terminal_outputs) ? parsed.terminal_outputs : [],
-        regression_comparisons: Array.isArray(parsed.regression_comparisons) ? parsed.regression_comparisons : [],
         cew_submissions: Array.isArray(parsed.cew_submissions)
           ? parsed.cew_submissions.map((sub: any) => ({
               ...sub,
@@ -302,19 +183,39 @@ export class DatabaseManager {
           : [],
         cew_scores: Array.isArray(parsed.cew_scores) ? parsed.cew_scores : [],
         expert_reviews: Array.isArray(parsed.expert_reviews) ? parsed.expert_reviews : [],
-        expert_reviews_history: Array.isArray(parsed.expert_reviews_history) ? parsed.expert_reviews_history : [],
-        exportedReviewIds: Array.isArray(parsed.exportedReviewIds) ? parsed.exportedReviewIds : [],
         defects: Array.isArray(parsed.defects) ? parsed.defects : [],
         guardrail_events: Array.isArray(parsed.guardrail_events) ? parsed.guardrail_events : [],
         guardrail_decisions: Array.isArray(parsed.guardrail_decisions) ? parsed.guardrail_decisions : [],
         telemetry_validations: Array.isArray(parsed.telemetry_validations) ? parsed.telemetry_validations : [],
         research_logs: Array.isArray(parsed.research_logs) ? parsed.research_logs : [],
-        config: this.normalizeConfigToOllamaDefault(parsed.config, defaultState.config!),
+        config: parsed.config ? { ...defaultState.config, ...parsed.config } : defaultState.config,
         activeRunId: parsed.activeRunId || null
       };
 
-      if (merged.ground_truth.length === 0 && merged.test_cases.length > 0) {
-        merged.ground_truth = buildInitialGroundTruthRecords(merged.test_cases);
+      // Auto-migrate legacy research_logs into telemetry_events if events is empty but logs exist
+      if (merged.telemetry_events.length === 0 && merged.research_logs.length > 0) {
+        merged.telemetry_events = merged.research_logs.map((legacy, idx) => ({
+          eventId: `legacy-evt-${idx + 1}`,
+          timestamp: legacy.timestamp || new Date().toISOString(),
+          runId: legacy.runId || 'legacy_migration_run',
+          sessionId: legacy.sessionId || `legacy-sess-${legacy.userId}`,
+          interactionId: `legacy-int-${idx + 1}`,
+          userId: legacy.userId || 'unknown',
+          actorType: 'student',
+          assignedCondition: legacy.condition || 'guided',
+          effectiveCondition: legacy.condition || 'guided',
+          taskId: legacy.levelId || 1,
+          taskDefinitionVersion: '1.0.0-legacy',
+          eventType: legacy.type === 'flag_attempt' ? 'flag_submit' : (legacy.type as any) || 'command',
+          input: legacy.input,
+          output: legacy.output,
+          sequenceNumber: idx + 1,
+          serverTimestamp: legacy.timestamp || new Date().toISOString(),
+          dataClassification: 'pilot',
+          applicationVersion: '1.0.0-legacy',
+          telemetrySchemaVersion: '1.0.0-legacy',
+          details: { legacyMetrics: legacy.metrics, isCorrect: legacy.isCorrect }
+        }));
       }
 
       this.persistSync(merged);
@@ -344,22 +245,23 @@ export class DatabaseManager {
     return this.writeLock;
   }
 
+  // --- GETTERS & SETTERS ---
+
   public getState(): DatabaseState {
     return this.state;
   }
 
+  // Config
   public getConfig(): AIConfig | null {
     return this.state.config;
   }
 
   public async setConfig(config: AIConfig): Promise<void> {
-    if (config.ollamaModel) validateOllamaModelRole(config.ollamaModel, 'tutor');
-    if (config.tutorModel) validateOllamaModelRole(config.tutorModel, 'tutor');
-    if (config.llamaGuardModel) validateOllamaModelRole(config.llamaGuardModel, 'guard');
     this.state.config = config;
     await this.persist();
   }
 
+  // Active Run Lock
   public getActiveRun(): FormalRun | null {
     if (!this.state.activeRunId) return null;
     return this.state.formal_runs.find(r => r.runId === this.state.activeRunId) || null;
@@ -386,23 +288,7 @@ export class DatabaseManager {
 
   // Tasks (Canonical 8 Tasks, preserving server-only flags & prohibitedDisclosures)
   public getTasks(): Level[] {
-    return this.state.levels
-      .filter(t => t.id >= 1 && t.id <= 8)
-      .map(t => {
-        const canonical = INITIAL_LEVELS.find(c => c.id === t.id);
-        if (!canonical) return t;
-        return {
-          ...t,
-          description: canonical.description,
-          objective: canonical.objective,
-          studentTask: canonical.studentTask,
-          goal: canonical.goal,
-          context: canonical.context,
-          successEvidence: canonical.successEvidence,
-          howToWork: canonical.howToWork,
-          constraints: canonical.constraints
-        };
-      });
+    return this.state.levels.filter(t => t.id >= 1 && t.id <= 8);
   }
 
   public getTaskById(id: number): Level | undefined {
@@ -418,6 +304,7 @@ export class DatabaseManager {
         return {
           ...existing,
           ...incoming,
+          // Never allow undefined from sanitized client payloads to erase secret server fields
           flag: incoming.flag !== undefined ? incoming.flag : existing?.flag,
           prohibitedDisclosures:
             incoming.prohibitedDisclosures !== undefined
@@ -484,7 +371,6 @@ export class DatabaseManager {
     actorType?: string;
     eventType?: string;
     testCaseId?: string;
-    executionId?: string;
   }): TelemetryEvent[] {
     const events = this.state.telemetry_events;
     if (!filter) return events;
@@ -496,12 +382,12 @@ export class DatabaseManager {
       if (filter.actorType && e.actorType !== filter.actorType) return false;
       if (filter.eventType && e.eventType !== filter.eventType) return false;
       if (filter.testCaseId && e.testCaseId !== filter.testCaseId) return false;
-      if (filter.executionId && e.executionId !== filter.executionId) return false;
       return true;
     });
   }
 
   public async appendTelemetryEvent(event: TelemetryEvent): Promise<TelemetryEvent> {
+    // Idempotency protection: prevent retries or reconnects from duplicating events or sequence numbers
     const idempKey = event.idempotencyKey || event.details?.idempotencyKey || event.eventId;
     if (idempKey) {
       const existing =
@@ -517,41 +403,31 @@ export class DatabaseManager {
       }
     }
 
+    // Atomically determine next monotonic sequence number for this session
     const sessId = event.sessionId || 'default_session';
-    const execId = event.executionId || event.details?.executionId || sessId;
-    const prevSessionMax =
+    const prevMax =
       this.sessionSequences.get(sessId) ??
       this.state.telemetry_events
-        .filter(e => e.sessionId === sessId || (e.executionId && e.executionId === execId))
+        .filter(e => e.sessionId === sessId)
         .reduce((max, e) => Math.max(max, e.sequenceNumber || 0), 0);
-    const nextSeq = prevSessionMax + 1;
+    const nextSeq = prevMax + 1;
     this.sessionSequences.set(sessId, nextSeq);
-    if (execId !== sessId) {
-      this.sessionSequences.set(execId, nextSeq);
-    }
     event.sequenceNumber = nextSeq;
-    event.executionId = execId;
     event.serverTimestamp = event.serverTimestamp || new Date().toISOString();
-    event.payload = event.payload || {
-      ...(event.input !== undefined ? { input: event.input } : {}),
-      ...(event.output !== undefined ? { output: event.output } : {}),
-      ...(event.details || {})
-    };
-    event.payloadSha256 =
-      event.payloadSha256 ||
-      'sha256:' + crypto.createHash('sha256').update(JSON.stringify(event.payload)).digest('hex');
 
     if (idempKey) {
       this.idempotencyKeys.set(idempKey, event);
     }
     this.state.telemetry_events.push(event);
 
+    // Append to immutable JSONL audit log
     try {
       await fs.promises.appendFile(this.jsonlPath, JSON.stringify(event) + '\n', 'utf8');
     } catch (err) {
       console.error('Failed to append to telemetry JSONL stream:', err);
     }
 
+    // Also push to legacy research_logs for backward compatibility
     const legacyLog: ResearchLog = {
       timestamp: event.timestamp,
       userId: event.userId,
@@ -581,6 +457,10 @@ export class DatabaseManager {
     return event;
   }
 
+  /**
+   * RQ4 Audit: Checks for missing sequence values, duplicate sequence values,
+   * out-of-order sequence values, and timestamp order conflicts.
+   */
   public auditSequenceIntegrity(sessionId?: string): {
     totalEvents: number;
     isMonotonic: boolean;
@@ -635,6 +515,10 @@ export class DatabaseManager {
     };
   }
 
+  /**
+   * RQ4 Record Linkage Audit: Verifies foreign keys and relationships between
+   * sessions, tasks, submissions, scores, and reviews.
+   */
   public validateRecordLinkages(): {
     totalSubmissions: number;
     orphanedSubmissions: number;
@@ -696,14 +580,11 @@ export class DatabaseManager {
 
   public async setTestCases(cases: TestCase[]): Promise<void> {
     this.state.test_cases = cases;
-    if (this.state.ground_truth.length === 0 && cases.length > 0) {
-      this.state.ground_truth = buildInitialGroundTruthRecords(cases);
-    }
     await this.persist();
   }
 
   public async saveTestCase(tc: TestCase): Promise<void> {
-    const idx = this.state.test_cases.findIndex(t => t.testCaseId === tc.testCaseId || t.id === tc.id);
+    const idx = this.state.test_cases.findIndex(t => t.testCaseId === tc.testCaseId);
     if (idx >= 0) {
       this.state.test_cases[idx] = tc;
     } else {
@@ -712,255 +593,9 @@ export class DatabaseManager {
     await this.persist();
   }
 
-  // Ground Truth Records (Requirement 3.3)
-  public getGroundTruthRecords(): GroundTruthRecord[] {
-    if (this.state.ground_truth.length === 0 && this.state.test_cases.length > 0) {
-      this.state.ground_truth = buildInitialGroundTruthRecords(this.state.test_cases);
-    }
-    return this.state.ground_truth;
-  }
-
-  public getGroundTruthByCaseId(caseId: string): GroundTruthRecord | undefined {
-    return this.getGroundTruthRecords().find(g => g.caseId === caseId);
-  }
-
-  public async saveGroundTruthRecord(record: GroundTruthRecord): Promise<void> {
-    const list = this.getGroundTruthRecords();
-    const idx = list.findIndex(g => g.caseId === record.caseId);
-    if (idx >= 0) {
-      list[idx] = record;
-    } else {
-      list.push(record);
-    }
-    this.state.ground_truth = list;
-    await this.persist();
-  }
-
-  public async setGroundTruthRecords(records: GroundTruthRecord[]): Promise<void> {
-    this.state.ground_truth = records;
-    await this.persist();
-  }
-
-  public deleteGroundTruthRecord(caseId: string): void {
-    this.state.ground_truth = this.getGroundTruthRecords().filter(g => g.caseId !== caseId);
-    void this.persist();
-  }
-
-  // Sequestered Cases & Gate (Requirement 3.4)
-  public getSequesteredCases(): SequesteredCaseRecord[] {
-    if (!this.state.sequestered_cases || this.state.sequestered_cases.length === 0) {
-      this.state.sequestered_cases = getCanonicalSequesteredCases();
-    }
-    return this.state.sequestered_cases;
-  }
-
-  public isKnownCaseRegressionComplete(): boolean {
-    return Boolean(this.state.knownCaseRegressionComplete);
-  }
-
-  public setKnownCaseRegressionComplete(completed: boolean): void {
-    this.state.knownCaseRegressionComplete = completed;
-    if (!completed) {
-      this.state.sequestered_cases = this.getSequesteredCases().map(sq => ({
-        ...sq,
-        sealed: true
-      }));
-    }
-    void this.persist();
-  }
-
-  public releaseSequesteredCases(releasedBy: string): SequesteredCaseRecord[] {
-    if (!this.state.knownCaseRegressionComplete) {
-      throw new Error(
-        'SEQUESTERED_LOCKED: Sequestered acceptance cases (SQ-01..SQ-06) cannot be unsealed or executed until knownCaseRegressionComplete === true.'
-      );
-    }
-    const now = new Date().toISOString();
-    this.state.sequestered_cases = this.getSequesteredCases().map(sq => ({
-      ...sq,
-      sealed: false,
-      releasedAt: sq.releasedAt || now,
-      releasedBy: sq.releasedBy || releasedBy
-    }));
-    void this.persist();
-    return this.state.sequestered_cases;
-  }
-
-  // Case Executions
-  public getCaseExecutions(filter?: { runId?: string; testCaseId?: string; executionId?: string; runType?: string }): CaseExecutionRecord[] {
-    const list = this.state.case_executions || [];
-    if (!filter) return list;
-    return list.filter(e => {
-      if (filter.runId && e.runId !== filter.runId) return false;
-      if (filter.testCaseId && e.testCaseId !== filter.testCaseId) return false;
-      if (filter.executionId && e.executionId !== filter.executionId) return false;
-      if (filter.runType && e.runType !== filter.runType && e.data_classification !== filter.runType) return false;
-      return true;
-    });
-  }
-
-  public async saveCaseExecution(exec: CaseExecutionRecord): Promise<void> {
-    if (!this.state.case_executions) this.state.case_executions = [];
-    const idx = this.state.case_executions.findIndex(e => e.executionId === exec.executionId);
-    if (idx >= 0) {
-      this.state.case_executions[idx] = exec;
-    } else {
-      this.state.case_executions.push(exec);
-    }
-    await this.persist();
-  }
-
-  // Tutor Interactions (Requirement 3.5)
-  public getInteractions(filter?: { runId?: string; caseId?: string; executionId?: string; sessionId?: string; taskId?: number }): TutorInteractionRecord[] {
-    const list = this.state.interactions || [];
-    if (!filter) return list;
-    return list.filter(i => {
-      if (filter.runId && i.runId !== filter.runId) return false;
-      if (filter.caseId && i.caseId !== filter.caseId) return false;
-      if (filter.executionId && i.executionId !== filter.executionId) return false;
-      if (filter.sessionId && i.sessionId !== filter.sessionId) return false;
-      if (filter.taskId !== undefined && i.taskId !== filter.taskId) return false;
-      return true;
-    });
-  }
-
-  public async appendInteraction(record: TutorInteractionRecord): Promise<void> {
-    if (!this.state.interactions) this.state.interactions = [];
-    const idx = this.state.interactions.findIndex(i => i.interactionId === record.interactionId);
-    if (idx >= 0) {
-      this.state.interactions[idx] = record;
-    } else {
-      this.state.interactions.push(record);
-    }
-    await this.persist();
-  }
-
-  // Record Integrity Reports (Requirement 3.2)
-  public getIntegrityReports(filter?: { runId?: string; caseId?: string; executionId?: string }): ExecutionIntegrityReport[] {
-    const list = this.state.integrity_reports || [];
-    if (!filter) return list;
-    return list.filter(r => {
-      if (filter.runId && r.runId !== filter.runId) return false;
-      if (filter.caseId && r.caseId !== filter.caseId) return false;
-      if (filter.executionId && r.executionId !== filter.executionId) return false;
-      return true;
-    });
-  }
-
-  public async saveIntegrityReport(report: ExecutionIntegrityReport): Promise<void> {
-    if (!this.state.integrity_reports) this.state.integrity_reports = [];
-    const idx = this.state.integrity_reports.findIndex(r => r.executionId === report.executionId);
-    if (idx >= 0) {
-      this.state.integrity_reports[idx] = report;
-    } else {
-      this.state.integrity_reports.push(report);
-    }
-    await this.persist();
-  }
-
-  // Container Sessions (Requirement 3.7)
-  public getContainerSessions(filter?: { sessionId?: string; taskId?: number; caseId?: string }): ContainerSessionRecord[] {
-    const list = this.state.container_sessions || [];
-    if (!filter) return list;
-    return list.filter(c => {
-      if (filter.sessionId && c.sessionId !== filter.sessionId) return false;
-      if (filter.taskId !== undefined && c.taskId !== filter.taskId) return false;
-      if (filter.caseId && c.caseId !== filter.caseId) return false;
-      return true;
-    });
-  }
-
-  public async saveContainerSession(rec: ContainerSessionRecord): Promise<void> {
-    if (!this.state.container_sessions) this.state.container_sessions = [];
-    const idx = this.state.container_sessions.findIndex(
-      c => c.sessionId === rec.sessionId && c.containerId === rec.containerId
-    );
-    if (idx >= 0) {
-      this.state.container_sessions[idx] = rec;
-    } else {
-      this.state.container_sessions.push(rec);
-    }
-    await this.persist();
-  }
-
-  // Terminal Commands & Outputs (Requirement 3.8)
-  public getTerminalCommands(filter?: { sessionId?: string; taskId?: number; caseId?: string; executionId?: string; runId?: string }): TerminalCommandRecord[] {
-    const list = this.state.terminal_commands || [];
-    if (!filter) return list;
-    return list.filter(c => {
-      if (filter.sessionId && c.sessionId !== filter.sessionId) return false;
-      if (filter.taskId !== undefined && c.taskId !== filter.taskId) return false;
-      if (filter.caseId && c.caseId !== filter.caseId) return false;
-      if (filter.executionId && c.executionId !== filter.executionId) return false;
-      if (filter.runId && c.runId !== filter.runId) return false;
-      return true;
-    });
-  }
-
-  public async appendTerminalCommand(cmd: TerminalCommandRecord): Promise<TerminalCommandRecord> {
-    if (!this.state.terminal_commands) this.state.terminal_commands = [];
-    const sessCmds = this.state.terminal_commands.filter(c => c.sessionId === cmd.sessionId);
-    const nextSeq = sessCmds.reduce((m, c) => Math.max(m, c.sequenceNumber || 0), 0) + 1;
-    cmd.sequenceNumber = cmd.sequenceNumber || nextSeq;
-    this.state.terminal_commands.push(cmd);
-    try {
-      await fs.promises.appendFile(this.cmdJsonlPath, JSON.stringify(cmd) + '\n', 'utf8');
-    } catch {
-      // ignore jsonl write failure
-    }
-    await this.persist();
-    return cmd;
-  }
-
-  public getTerminalOutputs(filter?: { sessionId?: string; taskId?: number; caseId?: string; executionId?: string; runId?: string }): TerminalOutputRecord[] {
-    const list = this.state.terminal_outputs || [];
-    if (!filter) return list;
-    return list.filter(o => {
-      if (filter.sessionId && o.sessionId !== filter.sessionId) return false;
-      if (filter.taskId !== undefined && o.taskId !== filter.taskId) return false;
-      if (filter.caseId && o.caseId !== filter.caseId) return false;
-      if (filter.executionId && o.executionId !== filter.executionId) return false;
-      if (filter.runId && o.runId !== filter.runId) return false;
-      return true;
-    });
-  }
-
-  public async appendTerminalOutput(out: TerminalOutputRecord): Promise<TerminalOutputRecord> {
-    if (!this.state.terminal_outputs) this.state.terminal_outputs = [];
-    const sessOuts = this.state.terminal_outputs.filter(o => o.sessionId === out.sessionId);
-    const nextSeq = sessOuts.reduce((m, o) => Math.max(m, o.sequenceNumber || 0), 0) + 1;
-    out.sequenceNumber = out.sequenceNumber || nextSeq;
-    this.state.terminal_outputs.push(out);
-    try {
-      await fs.promises.appendFile(this.outJsonlPath, JSON.stringify(out) + '\n', 'utf8');
-    } catch {
-      // ignore jsonl write failure
-    }
-    await this.persist();
-    return out;
-  }
-
-  // Regression Comparisons (Requirement 3.10 & 3.11)
-  public getRegressionComparisons(runId?: string): RegressionComparisonRecord[] {
-    const list = this.state.regression_comparisons || [];
-    if (!runId) return list;
-    return list.filter(c => c.regressionRunId === runId || c.round1RunId === runId);
-  }
-
-  public async saveRegressionComparison(comp: RegressionComparisonRecord): Promise<void> {
-    if (!this.state.regression_comparisons) this.state.regression_comparisons = [];
-    const idx = this.state.regression_comparisons.findIndex(c => c.comparisonId === comp.comparisonId);
-    if (idx >= 0) {
-      this.state.regression_comparisons[idx] = comp;
-    } else {
-      this.state.regression_comparisons.push(comp);
-    }
-    await this.persist();
-  }
-
   // CEW Submissions & Scores
   public getCEWSubmissions(filter?: { runId?: string; taskId?: number; userId?: string }): CEWSubmission[] {
-    const list = this.state.cew_submissions;
+    let list = this.state.cew_submissions;
     if (!filter) return list;
     return list.filter(s => {
       if (filter.runId && s.runId !== filter.runId) return false;
@@ -985,76 +620,26 @@ export class DatabaseManager {
     await this.persist();
   }
 
-  // Expert Reviews (with Versioned Edits and Exported Read-Only Lock per Requirement 3.10)
-  public getExpertReviews(filter?: { runId?: string; taskId?: number; testCaseId?: string; executionId?: string }): ExpertReview[] {
-    const list = this.state.expert_reviews;
+  // Expert Reviews
+  public getExpertReviews(filter?: { runId?: string; taskId?: number; testCaseId?: string }): ExpertReview[] {
+    let list = this.state.expert_reviews;
     if (!filter) return list;
     return list.filter(r => {
       if (filter.runId && r.runId !== filter.runId) return false;
       if (filter.taskId !== undefined && r.taskId !== filter.taskId) return false;
       if (filter.testCaseId && r.testCaseId !== filter.testCaseId) return false;
-      if (filter.executionId && r.executionId !== filter.executionId) return false;
       return true;
     });
   }
 
-  public getExpertReviewsHistory(): ExpertReview[] {
-    return this.state.expert_reviews_history || [];
-  }
-
-  public async markReviewsExported(reviewIds: string[]): Promise<void> {
-    if (!this.state.exportedReviewIds) this.state.exportedReviewIds = [];
-    const set = new Set([...this.state.exportedReviewIds, ...reviewIds]);
-    this.state.exportedReviewIds = Array.from(set);
-    for (const r of this.state.expert_reviews) {
-      if (set.has(r.reviewId)) {
-        r.readOnlyAfterExport = true;
-      }
-    }
-    await this.persist();
-  }
-
-  public async saveExpertReview(review: ExpertReview, editedBy?: string): Promise<ExpertReview> {
-    if (!this.state.expert_reviews_history) this.state.expert_reviews_history = [];
-    if (!this.state.exportedReviewIds) this.state.exportedReviewIds = [];
-
+  public async saveExpertReview(review: ExpertReview): Promise<void> {
     const idx = this.state.expert_reviews.findIndex(r => r.reviewId === review.reviewId);
     if (idx >= 0) {
-      const existing = this.state.expert_reviews[idx];
-      if (existing.readOnlyAfterExport || this.state.exportedReviewIds.includes(existing.reviewId)) {
-        throw new Error(
-          `READ_ONLY_EXPORTED_RECORD: Review ${existing.reviewId} has been exported in a formal archive and is immutable.`
-        );
-      }
-      const prevVersion = existing.version || 1;
-      const snapshotId = `${existing.reviewId}-v${prevVersion}`;
-      this.state.expert_reviews_history.push({
-        ...existing,
-        reviewId: snapshotId
-      });
-
-      const updated: ExpertReview = {
-        ...existing,
-        ...review,
-        version: prevVersion + 1,
-        previousVersionId: snapshotId,
-        editedBy: editedBy || review.editedBy || review.reviewerId,
-        editedAt: new Date().toISOString()
-      };
-      this.state.expert_reviews[idx] = updated;
-      await this.persist();
-      return updated;
+      this.state.expert_reviews[idx] = review;
     } else {
-      const created: ExpertReview = {
-        ...review,
-        version: review.version || 1,
-        editedBy: editedBy || review.editedBy || review.reviewerId,
-        editedAt: review.editedAt || review.timestamp || new Date().toISOString()
-      };
-      this.state.expert_reviews.push(created);
-      await this.persist();
-      return created;
+      this.state.expert_reviews.push(review);
     }
+    await this.persist();
   }
 
   // Guardrail Events
@@ -1112,7 +697,7 @@ export class DatabaseManager {
   }
 
   // Data Retention / Cleanup
-  public async deleteNonFormalData(types: ('pilot' | 'demonstration' | 'regression' | 'synthetic' | 'dev_smoke')[]): Promise<{ deletedEvents: number; deletedRuns: number }> {
+  public async deleteNonFormalData(types: ('pilot' | 'demonstration' | 'regression' | 'synthetic')[]): Promise<{ deletedEvents: number; deletedRuns: number }> {
     const initialEvents = this.state.telemetry_events.length;
     const initialRuns = this.state.formal_runs.length;
 
@@ -1124,142 +709,6 @@ export class DatabaseManager {
     return {
       deletedEvents: initialEvents - this.state.telemetry_events.length,
       deletedRuns: initialRuns - this.state.formal_runs.length
-    };
-  }
-
-  /**
-   * Confirmed Archive-and-Reset (Requirement 3.10):
-   * Requires explicit confirmation token 'CONFIRM_ARCHIVE_AND_RESET' (never silent).
-   * Archives existing research_lab.json and JSONL files before resetting to a clean study baseline.
-   */
-  public async archiveAndResetStudyData(
-    confirmToken: string,
-    initialLevels: Level[] = [],
-    initialTestCases: TestCase[] = []
-  ): Promise<{ archiveDir: string; archivedFiles: string[]; timestamp: string }> {
-    const validTokens = new Set(['CONFIRM_ARCHIVE_AND_RESET', 'ARCHIVE_AND_RESET_STUDY_DATA', 'START NEW COLLECTION']);
-    if (!validTokens.has(confirmToken)) {
-      throw new Error(
-        'CONFIRMATION_REQUIRED: archiveAndResetStudyData requires confirmToken === "CONFIRM_ARCHIVE_AND_RESET".'
-      );
-    }
-
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const archiveDir = path.join(this.dataDir, 'archives', `archive_${timestamp}`);
-    fs.mkdirSync(archiveDir, { recursive: true });
-
-    const archivedFiles: string[] = [];
-    for (const filePath of [this.jsonPath, this.jsonlPath, this.cmdJsonlPath, this.outJsonlPath]) {
-      if (fs.existsSync(filePath)) {
-        const baseName = path.basename(filePath);
-        const dest = path.join(archiveDir, baseName);
-        fs.copyFileSync(filePath, dest);
-        archivedFiles.push(baseName);
-      }
-    }
-
-    await this.resetToCleanBaseline(initialLevels, initialTestCases);
-    return { archiveDir, archivedFiles, timestamp };
-  }
-
-  /**
-   * Resets data/research_lab.json and JSONL streams to a clean, unpolluted baseline.
-   */
-  public async resetToCleanBaseline(initialLevels: Level[] = [], initialTestCases: TestCase[] = []): Promise<void> {
-    const cleanState = this.getDefaultState();
-    cleanState.levels = initialLevels.filter(l => l.id >= 1 && l.id <= 8);
-    cleanState.test_cases = initialTestCases;
-    cleanState.ground_truth = buildInitialGroundTruthRecords(initialTestCases);
-    cleanState.sequestered_cases = getCanonicalSequesteredCases();
-    this.state = cleanState;
-    this.sessionSequences.clear();
-    this.idempotencyKeys.clear();
-    for (const p of [this.jsonlPath, this.cmdJsonlPath, this.outJsonlPath]) {
-      if (fs.existsSync(p)) {
-        fs.writeFileSync(p, '', 'utf8');
-      }
-    }
-    await this.persist();
-  }
-
-  public isFreezeStateLocked(): boolean {
-    const activeRun = this.getActiveRun();
-    return Boolean(activeRun && activeRun.isLocked);
-  }
-
-  public getGovernanceState(): {
-    currentState: 'DEVELOPMENT' | 'PILOT_ACTIVE' | 'FORMAL_LOCKED';
-    researchMode: string;
-    protocolVersion: string;
-    applicationVersion: string;
-    tutorVersion: string;
-    datasetId: string;
-    learningMeasureDefined: boolean;
-    activeManifest: any;
-    protocolDeviations: any[];
-    transitionHistory: any[];
-  } {
-    const activeRun = this.getActiveRun();
-    const currentState = activeRun?.isLocked
-      ? activeRun.runType === 'pilot'
-        ? 'PILOT_ACTIVE'
-        : 'FORMAL_LOCKED'
-      : 'DEVELOPMENT';
-    return {
-      currentState,
-      researchMode: activeRun?.runType || 'development',
-      protocolVersion: 'V5.0.0',
-      applicationVersion: '1.0.0',
-      tutorVersion: '5.0.0',
-      datasetId: activeRun?.runId || 'dataset_v5_baseline',
-      learningMeasureDefined: true,
-      activeManifest: (activeRun as any)?.frozenManifest || null,
-      protocolDeviations: [],
-      transitionHistory: []
-    };
-  }
-
-  public runPreflightCheck(
-    targetPhase: string = 'PILOT_ACTIVE',
-    allowSkipLiveInfra: boolean = false
-  ): {
-    targetPhase: string;
-    totalChecks: number;
-    passedCount: number;
-    allMandatoryPassed: boolean;
-    checks: { checkId: string; name: string; passed: boolean; detail: string }[];
-  } {
-    const tasksOk = this.getTasks().length === 8;
-    const casesOk = this.getTestCases().length === 24;
-    const checks = [
-      {
-        checkId: 'PF-01',
-        name: '8 Canonical Tasks Loaded',
-        passed: tasksOk,
-        detail: `Loaded ${this.getTasks().length} tasks`
-      },
-      {
-        checkId: 'PF-02',
-        name: '24 Standardized Cases Loaded',
-        passed: casesOk,
-        detail: `Loaded ${this.getTestCases().length} cases`
-      },
-      {
-        checkId: 'PF-03',
-        name: 'Live Infrastructure Verification',
-        passed: allowSkipLiveInfra,
-        detail: allowSkipLiveInfra
-          ? 'Live infra skipped by flag'
-          : 'Requires live Docker and Ollama on local Ubuntu VM'
-      }
-    ];
-    const passedCount = checks.filter(c => c.passed).length;
-    return {
-      targetPhase,
-      totalChecks: checks.length,
-      passedCount,
-      allMandatoryPassed: passedCount === checks.length,
-      checks
     };
   }
 }

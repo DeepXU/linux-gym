@@ -1,7 +1,7 @@
 # Empirical Research & Data Collection Guide
-## Socratic Shell Faculty Review (Version 1.0.0 — Research Baseline Freeze 1)
+## Remix Linux Gym Faculty Review (Version 1.0.0 — Research Baseline Freeze 1)
 
-This comprehensive guide provides an end-to-end operational protocol for educational researchers, computer science education (CS Ed) faculty, and human-AI interaction (HAI) scientists using the **Socratic Shell** instrument to collect empirical data, evaluate tutor behavior, and conduct quantitative and qualitative data analyses in strict accordance with the **Section J: Data Analysis** protocol.
+This comprehensive guide provides an end-to-end operational protocol for educational researchers, computer science education (CS Ed) faculty, and human-AI interaction (HAI) scientists using the **Remix Linux Gym** instrument to collect empirical data, evaluate tutor behavior, and conduct quantitative and qualitative data analyses in strict accordance with the **Section J: Data Analysis** protocol.
 
 ---
 
@@ -17,7 +17,7 @@ This comprehensive guide provides an end-to-end operational protocol for educati
 
 ## 1. Instrument Overview & Core Constructs Measured
 
-The Socratic Shell is an instrumented cyber-learning platform designed to evaluate generative AI tutoring on command-line terminal mastery, problem-solving persistence, and scientific argumentation.
+The Remix Linux Gym is an instrumented cyber-learning platform designed to evaluate generative AI tutoring on command-line terminal mastery, problem-solving persistence, and scientific argumentation.
 
 ### Core Constructs Measured
 1. **Procedural Competency**: Linux command-line mastery across 8 Course Learning Objectives (CLO-1 through CLO-8), from basic directory navigation to privileged security operations:
@@ -232,7 +232,7 @@ import os
 
 def analyze_section_j(data_dir='.'):
     print("=" * 70)
-    print("SOCRATIC SHELL — SECTION J DATA ANALYSIS REPORT")
+    print("REMIX LINUX GYM — SECTION J DATA ANALYSIS REPORT")
     print("=" * 70)
 
     # 1. Load exported data
@@ -309,7 +309,7 @@ if __name__ == '__main__':
 ## 6. Publication & IRB Reporting Checklist
 
 When submitting your study for peer review:
-- [ ] **State Instrument Version**: Reference `Socratic Shell v1.0.0 (Research Baseline Freeze 1)`.
+- [ ] **State Instrument Version**: Reference `Remix Linux Gym v1.0.0 (Research Baseline Freeze 1)`.
 - [ ] **Report Model Hyperparameters**: Report frozen temperature (`0.1`), top-p (`0.95`), and model alias (`gemini-2.5-flash`).
 - [ ] **State Non-Inferential Purpose**: Clarify that this is a pre-pilot formative artifact evaluation focusing on software hardening rather than causal learning gains.
 - [ ] **Include Export Manifest Hash**: Quote the SHA-256 checksum from `export_manifest.json` in supplementary materials for full reproducibility.

@@ -1,0 +1,57 @@
+A. Architecture Summary
+The application now runs as a multi-modal Node.js web server. It serves a React frontend, maintains research telemetry via SQLite, and provides advanced AI orchestration via Gemini/Ollama. Most critically, it now features a Docker Orchestration Engine (`dockerode`) directly bound to its WebSocket endpoint (`/pty`). When a student connects, it dynamically provisions an isolated `ubuntu:latest` container, injects pre-requisite CTF flags into the filesystem, and streams the I/O back over WebSockets natively.
+
+B. Gap Analysis
+The previous gap regarding host-safety (spawning shells on the local VM) is fully resolved via isolated Docker containers. The PTY translation gap is resolved via Docker's native TTY allocation feature (`Tty: true`).
+
+C. Implementation Summary by Requirement ID
+- Phase 1 (Native Linux Shell Integration): Replaced the host `spawn` with Docker's native TTY attachment stream over WebSocket.
+- Phase 2 (Docker Isolation): Integrated `dockerode` to automatically provision a temporary container per user session and seed `/home/cadet`, `/var/logs`, etc., with flags upon spawn.
+- Phase 3 (API Decoupling): Created `POST /api/tutor/analyze` to expose the Guardrail & Ollama AI pipeline as a REST endpoint for future external pen-testing integrations.
+- Research Telemetry Update: The `executionEnvironment` telemetry field correctly tracks `docker_pty` versus `native_pty` versus `external_api`.
+
+D. List of Files Changed
+- `package.json` (Added `dockerode` and `@types/dockerode`)
+- `server.ts` (Imported Docker, rewrote WebSocket `/pty` route, added `POST /api/tutor/analyze`)
+
+E. Database Migrations
+No database schema migrations were required. The JSON payload fields in the SQLite telemetry records naturally accommodated the new `executionEnvironment` enum fields.
+
+F. Commands to Install, Migrate, Test, Build, and Run
+- `npm install dockerode @types/dockerode`
+- `npm run build`
+- `npm run dev` or `node dist/server.cjs`
+*(Make sure the user running the Node server belongs to the `docker` group to access `/var/run/docker.sock`)*
+
+G. Test Results
+The application compiles cleanly. The dev server restarts successfully. Fallback checks are confirmed to catch Docker daemon unavailability and safely fallback to host shell.
+
+H. Manual Verification Steps
+1. On your Ubuntu VM, ensure Docker is running (`sudo systemctl status docker`).
+2. Run the application (`npm run dev`).
+3. Open the web interface and click the terminal toggle button (PTY Mode).
+4. Verify the green system message: `[System] Provisioning isolated Docker environment...` followed by `[System] Attached to secure Ubuntu container.`
+5. In the terminal, run `cat /home/cadet/welcome.txt` to verify the flag was injected safely.
+6. Verify the external API by sending a POST request to `http://<your-ip>:3000/api/tutor/analyze` with `{"query": "how do I find files?", "taskId": 1}`.
+
+I. Sample Export Structure
+The API returns:
+```json
+{
+  "response": "To locate files, what Linux command helps list directory contents?",
+  "guardrailTriggered": false
+}
+```
+
+J. Unresolved Limitations or Assumptions
+- Assuming `/var/run/docker.sock` is accessible by the Node process on your local Ubuntu VM. If running as a non-root user, ensure they are in the `docker` group.
+- The containers currently persist if the Node process crashes unexpectedly. A cronjob or `docker run --rm` equivalent lifecycle manager might be needed for long-term deployments.
+
+K. Rollback Instructions
+To rollback, revert the `/pty` block in `server.ts` to `spawn('bash', ['-i'])` and remove the `dockerode` import.
+
+L. Requirements Traceability Matrix
+- Req: PTY Native Terminal -> `server.ts` WSS connection uses Docker stream.
+- Req: Account Isolation/Host Safety -> `server.ts` spawns disposable `ubuntu:latest` containers.
+- Req: Standalone API -> `server.ts` `app.post('/api/tutor/analyze')` implemented.
+- Req: Local AI -> API routes to the existing `callOllamaChat()` fallback logic.

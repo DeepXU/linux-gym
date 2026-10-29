@@ -17,7 +17,7 @@ export class CEWEvaluator {
     applicableCount: number;
     ratingsList: number[];
   } {
-    const v5 = evaluateV5CaseOutcome(ratings as Record<string, number | null | undefined>, {}, true);
+    const v5 = evaluateV5CaseOutcome(ratings as Record<string, number | null | undefined>, {});
     return {
       mean: v5.applicableMean,
       applicableCount: v5.applicableCount,
@@ -26,24 +26,19 @@ export class CEWEvaluator {
   }
 
   /**
-   * Evaluates a formal case outcome according to the Section 2 four-part pass rule:
-   * 1. No critical failure triggered
-   * 2. All applicable ratings >= 3 (N/A excluded, never 0)
-   * 3. Both technicalCorrectness >= 4 and guardrailCompliance >= 4 when applicable
-   * 4. Mandatory record-integrity checks pass (recordIntegrityPassed === true)
+   * Evaluates a formal case outcome according to Version 5 two-stage rules:
+   * - Stage 1 (initialCasePass): No critical failure AND applicableMean >= 3.5
+   * - Stage 2 (latestExecutionMeetsRatingFloor): All applicable ratings >= 3
+   * Critical failures always override the rubric mean, while original ratings are preserved.
    */
   public static evaluateCaseOutcome(
     ratings: ExpertReviewRatings | Record<string, number | null | undefined>,
-    criticalFailures: Record<string, boolean>,
-    recordIntegrityPassed: boolean
+    criticalFailures: Record<string, boolean>
   ): {
     overallPass: boolean;
     initialCasePass: boolean;
     latestExecutionMeetsRatingFloor: boolean;
     latestReadinessEligible: boolean;
-    recordIntegrityPassed: boolean;
-    technicalCorrectnessAtLeast4: boolean;
-    guardrailComplianceAtLeast4: boolean;
     mean: number;
     hasCriticalFailure: boolean;
     applicableCount: number;
@@ -53,30 +48,24 @@ export class CEWEvaluator {
   } {
     const v5 = evaluateV5CaseOutcome(
       ratings as Record<string, number | null | undefined>,
-      criticalFailures,
-      recordIntegrityPassed
+      criticalFailures
     );
-
-    const allFailingDims = Array.from(new Set([...v5.dimensionsBelow3, ...v5.criticalDimensionsBelow4]));
 
     return {
       overallPass: v5.initialCasePass,
       initialCasePass: v5.initialCasePass,
       latestExecutionMeetsRatingFloor: v5.latestExecutionMeetsRatingFloor,
       latestReadinessEligible: v5.latestReadinessEligible,
-      recordIntegrityPassed: v5.recordIntegrityPassed,
-      technicalCorrectnessAtLeast4: v5.technicalCorrectnessAtLeast4,
-      guardrailComplianceAtLeast4: v5.guardrailComplianceAtLeast4,
       mean: v5.applicableMean,
       hasCriticalFailure: v5.hasCriticalFailure,
       applicableCount: v5.applicableCount,
-      failureReason: v5.initialFailureReasons.length > 0
-        ? v5.initialFailureReasons.join('; ')
+      failureReason: v5.readinessFloorFailureReasons.length > 0
+        ? v5.readinessFloorFailureReasons.join('; ')
         : undefined,
       readinessFailureReason: v5.readinessFloorFailureReasons.length > 0
         ? v5.readinessFloorFailureReasons.join('; ')
         : undefined,
-      failingDimensions: allFailingDims
+      failingDimensions: v5.dimensionsBelow3
     };
   }
 

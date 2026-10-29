@@ -12,7 +12,6 @@
 
 import { Level, AIConfig, GuardrailDecisionOutcome, GuardrailDecisionRecord } from '../types';
 import { db } from './db';
-import { DEFAULT_OLLAMA_URL, DEFAULT_GUARD_MODEL } from './protocolV5';
 
 // --- OFFICIAL META LLAMA GUARD 3 MLCOMMONS TAXONOMY (S1–S13) ---
 export const OFFICIAL_LLAMA_GUARD_CATEGORIES: Record<string, { code: string; name: string; description: string }> = {
@@ -162,20 +161,8 @@ Provide your safety assessment for ONLY THE LAST ${checkRole} message in the abo
   ): Promise<LlamaGuardEvaluationResult> {
     const startTime = Date.now();
     const config: Partial<AIConfig> = db.getConfig() || {};
-    const rawOllamaUrl =
-      options?.ollamaUrl ||
-      config.ollamaUrl ||
-      process.env.OLLAMA_BASE_URL ||
-      process.env.OLLAMA_URL ||
-      DEFAULT_OLLAMA_URL;
-    const cleanOllamaBase = rawOllamaUrl
-      .replace(/\/+$/, '')
-      .replace(/\/api\/(chat|generate)$/i, '');
-    const guardModel =
-      options?.guardModel ||
-      config.llamaGuardModel ||
-      process.env.LLAMA_GUARD_MODEL ||
-      DEFAULT_GUARD_MODEL;
+    const ollamaUrl = options?.ollamaUrl || config.ollamaUrl || process.env.OLLAMA_BASE_URL || 'http://localhost:2004';
+    const guardModel = options?.guardModel || config.llamaGuardModel || process.env.LLAMA_GUARD_MODEL || this.OFFICIAL_MODEL_TAG;
     const isFormal = options?.isFormalRun ?? (db.getActiveRun()?.runType === 'formal');
     const timeoutMs = options?.timeoutMs ?? 3000;
 
@@ -185,7 +172,7 @@ Provide your safety assessment for ONLY THE LAST ${checkRole} message in the abo
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-      const res = await fetch(`${cleanOllamaBase}/api/generate`, {
+      const res = await fetch(`${ollamaUrl.replace(/\/+$/, '')}/api/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -255,10 +242,9 @@ Provide your safety assessment for ONLY THE LAST ${checkRole} message in the abo
    * Parses official Llama Guard output into discrete decision outcomes.
    */
   public static parseLlamaGuardOutput(output: string, latencyMs: number = 0): LlamaGuardEvaluationResult {
-    const cleanedOutput = output.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-    const lines = cleanedOutput.split('\n').map(l => l.trim()).filter(Boolean);
-    const firstLine = (lines[0] || '').replace(/^[*_`#"'\s]+|[*_`#"'.\s]+$/g, '').toLowerCase();
-    const firstWord = firstLine.split(/[\s,:.;!]+/)[0] || '';
+    const lines = output.split('\n').map(l => l.trim()).filter(Boolean);
+    const firstLine = (lines[0] || '').toLowerCase();
+    const firstWord = firstLine.split(/[\s,:]+/)[0] || '';
 
     if (firstWord === 'unsafe') {
       const secondLine = lines[1] || '';

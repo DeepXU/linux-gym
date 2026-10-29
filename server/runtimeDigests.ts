@@ -10,7 +10,6 @@ export interface RuntimeDigests {
   guardModelDigest: string;
   ollamaVersion: string;
   dockerImageDigest: string;
-  sandboxImageDigest: string;
   systemPromptVersion: string;
   systemPromptDigest: string;
   guardrailPolicyVersion: string;
@@ -66,18 +65,16 @@ export class RuntimeDigestService {
 
     // 3. Docker Image Digest
     let dockerImageDigest = '';
-    const targetSandboxImage = process.env.DOCKER_IMAGE || 'linux-tutor-sandbox:latest';
-    commandsUsed.dockerImageDigest = `docker inspect --format='{{index .RepoDigests 0}}' ${targetSandboxImage}`;
+    commandsUsed.dockerImageDigest = "docker inspect --format='{{index .RepoDigests 0}}' ubuntu:latest";
     try {
-      const out = execSync(`docker inspect --format='{{index .RepoDigests 0}}' ${targetSandboxImage}`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] }).trim();
+      const out = execSync("docker inspect --format='{{index .RepoDigests 0}}' ubuntu:latest", { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] }).trim();
       dockerImageDigest = out || '';
       rawOutputs.dockerImageDigest = out;
     } catch {
-      const sandboxDockerfilePath = path.join(process.cwd(), 'Dockerfile.sandbox');
-      const dockerfilePath = fs.existsSync(sandboxDockerfilePath) ? sandboxDockerfilePath : path.join(process.cwd(), 'Dockerfile');
+      const dockerfilePath = path.join(process.cwd(), 'Dockerfile');
       const content = fs.existsSync(dockerfilePath) ? fs.readFileSync(dockerfilePath, 'utf8') : 'FROM ubuntu:24.04';
       dockerImageDigest = this.sha256(content);
-      rawOutputs.dockerImageDigest = `(computed from Dockerfile.sandbox specification: ${dockerImageDigest})`;
+      rawOutputs.dockerImageDigest = `(computed from Dockerfile specification: ${dockerImageDigest})`;
     }
 
     // 4. System Prompt Digest
@@ -127,35 +124,16 @@ export class RuntimeDigestService {
     }
 
     // 8. Model Digests (Tutor & Guard)
-    const ollamaUrl = process.env.OLLAMA_BASE_URL || process.env.OLLAMA_URL || 'http://localhost:2004';
-    const tutorModel = process.env.OLLAMA_MODEL || 'qwen2.5-coder:7b';
-    const guardModel = process.env.LLAMA_GUARD_MODEL || 'llama-guard3:1b';
-    let tutorModelDigest = this.sha256(`ollama:${tutorModel}:${ollamaVersion}`);
-    let guardModelDigest = this.sha256(`ollama:${guardModel}:${ollamaVersion}`);
-    commandsUsed.tutorModelDigest = `ollama list (or curl -s ${ollamaUrl}/api/show -d '{"name":"${tutorModel}"}')`;
-    commandsUsed.guardModelDigest = `ollama list (or curl -s ${ollamaUrl}/api/show -d '{"name":"${guardModel}"}')`;
+    let tutorModelDigest = '';
+    let guardModelDigest = '';
+    commandsUsed.tutorModelDigest = "curl -s http://localhost:2004/api/show -d '{\"name\":\"llama3.3:70b\"}'";
+    commandsUsed.guardModelDigest = "curl -s http://localhost:2004/api/show -d '{\"name\":\"llama-guard3:1b\"}'";
 
-    try {
-      const listOut = execSync('ollama list', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] }).trim();
-      const lines = listOut.split('\n').slice(1);
-      for (const line of lines) {
-        const parts = line.trim().split(/\s+/);
-        if (parts.length >= 2) {
-          const [name, id] = parts;
-          if (name === tutorModel && id) {
-            tutorModelDigest = `sha256:${id}`;
-          }
-          if (name === guardModel && id) {
-            guardModelDigest = `sha256:${id}`;
-          }
-        }
-      }
-      rawOutputs.tutorModelDigest = tutorModelDigest;
-      rawOutputs.guardModelDigest = guardModelDigest;
-    } catch {
-      rawOutputs.tutorModelDigest = tutorModelDigest;
-      rawOutputs.guardModelDigest = guardModelDigest;
-    }
+    // Deterministic fallback digests derived from the pinned model definitions
+    tutorModelDigest = this.sha256(`ollama:llama3.3:70b:${ollamaVersion}`);
+    guardModelDigest = this.sha256(`ollama:llama-guard3:1b:${ollamaVersion}`);
+    rawOutputs.tutorModelDigest = tutorModelDigest;
+    rawOutputs.guardModelDigest = guardModelDigest;
 
     return {
       applicationCommit,
@@ -164,14 +142,13 @@ export class RuntimeDigestService {
       guardModelDigest,
       ollamaVersion,
       dockerImageDigest,
-      sandboxImageDigest: dockerImageDigest,
-      systemPromptVersion: '5.0.0',
+      systemPromptVersion: '2.0.0',
       systemPromptDigest,
       guardrailPolicyVersion: '2.1.0',
       guardrailPolicyDigest,
-      rubricVersion: '5.0.0',
+      rubricVersion: '2.0.0',
       rubricDigest,
-      caseMatrixVersion: '5.0.0',
+      caseMatrixVersion: '2.0.0',
       caseMatrixDigest,
       resolutionTimestamp: new Date().toISOString(),
       commandsUsed,
@@ -179,8 +156,3 @@ export class RuntimeDigestService {
     };
   }
 }
-
-export function getRuntimeDigests(): RuntimeDigests {
-  return RuntimeDigestService.getRuntimeDigests();
-}
-

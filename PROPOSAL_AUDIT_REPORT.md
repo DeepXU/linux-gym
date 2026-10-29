@@ -1,6 +1,6 @@
 # Comprehensive Production-Readiness & Research Proposal Compliance Audit Report
 
-**Evaluated Artifact:** Socratic Shell: Guided AI Linux Tutor & Pre-Pilot Evaluation Platform (`v1.0.0`)  
+**Evaluated Artifact:** Linux Gym: Guided AI Linux Tutor & Pre-Pilot Evaluation Platform (`v1.0.0`)  
 **Reference Specification:** *"Evaluating the Technical Accuracy and Pedagogical Quality of a Guided AI Tutor for Introductory Linux Tasks"* (`guided_ai_proposal_ieee_final_1e7eb0d0.tex`, Deep Ramanayake, Dakota State University)  
 **Audit Date:** October 27, 2026  
 **Overall Readiness Verdict:** **NO-GO (Conditional Hold for Formal Round 1 Data Collection)** — *Requires remediation of 5 Critical and 6 High-severity architectural/experimental defects before formal baseline freeze.*

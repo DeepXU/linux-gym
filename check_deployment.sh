@@ -161,18 +161,16 @@ if command -v ss &> /dev/null; then
     fi
 fi
 
-# Probe Ollama Local LLM on Port 11434 (or Port 2004)
+# Probe Ollama Local LLM on Port 2004 (fallback: 11434)
 OLLAMA_FOUND=false
-if curl -s --connect-timeout 2 http://localhost:11434/api/tags &> /dev/null; then
-    OLLAMA_MODELS=$(curl -s http://localhost:11434/api/tags | grep -o '"name":"[^"]*"' | head -n 3 | tr '\n' ' ')
-    report_pass "Ollama LLM (Port 11434)" "Connected successfully (${OLLAMA_MODELS:-Ready})"
-    OLLAMA_FOUND=true
-elif curl -s --connect-timeout 2 http://localhost:2004/api/tags &> /dev/null; then
+if curl -s --connect-timeout 2 http://localhost:2004/api/tags &> /dev/null; then
     OLLAMA_MODELS=$(curl -s http://localhost:2004/api/tags | grep -o '"name":"[^"]*"' | head -n 3 | tr '\n' ' ')
     report_pass "Ollama LLM (Port 2004)" "Connected successfully (${OLLAMA_MODELS:-Ready})"
     OLLAMA_FOUND=true
+elif curl -s --connect-timeout 2 http://localhost:11434/api/tags &> /dev/null; then
+    report_warn "Ollama LLM" "Listening on default port 11434 instead of dedicated port 2004. Set OLLAMA_HOST=0.0.0.0:2004 in systemd unit."
 else
-    report_warn "Ollama LLM" "No Ollama instance currently responding on port 11434 or 2004 (Run 'ollama serve' and pull 'qwen2.5-coder:7b' + 'llama-guard3:1b')"
+    report_warn "Ollama LLM" "No Ollama instance currently responding on port 2004 (Start via systemd or docker-compose)"
 fi
 
 # Probe vLLM Local LLM on Port 2005 (fallback: 8000)

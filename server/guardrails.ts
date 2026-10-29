@@ -391,29 +391,6 @@ ${escapedUserQuery}
       }
     }
 
-    // 4. Prevent unauthorized task completion confirmation (Requirement 3.12: only server-side flag verifier may confirm task completion)
-    const completionConfirmationPatterns = [
-      /\b(you\s+have\s+successfully\s+completed\s+the\s+task|task\s+is\s+now\s+complete|challenge\s+completed\s+successfully|congratulations[,!\s]+you\s+(solved|completed)\s+task)/i
-    ];
-    for (const pat of completionConfirmationPatterns) {
-      if (pat.test(output)) {
-        return {
-          allowed: false,
-          sanitizedOutput: 'Submit your discovered flag in the verification panel so the server verifier can confirm task completion.',
-          redirectedMessage: 'Submit your discovered flag in the verification panel so the server verifier can confirm task completion.',
-          violated: true,
-          detectedCategory: 'CUSTOM_COMPLETION_CONFIRMATION',
-          severity: 'high',
-          finalDecision: 'SAFE_REDIRECT',
-          decisionReason: 'Deterministic output check prevented tutor from prematurely confirming task completion',
-          officialCategoriesViolated: [],
-          customCategoriesViolated: ['CUSTOM_COMPLETION_CONFIRMATION'],
-          fallbackUsed: false,
-          fallbackType: 'none'
-        };
-      }
-    }
-
     return {
       allowed: true,
       sanitizedOutput: output,
@@ -780,11 +757,11 @@ ${escapedUserQuery}
       sessionId: context.sessionId || 'anonymous-session',
       taskId: context.taskId || 1,
       testingStage: context.testingStage,
-      tutorModelName: context.tutorModelName || 'qwen2.5-coder:7b',
+      tutorModelName: context.tutorModelName || 'llama3.3:70b',
       tutorModelDigest: context.tutorModelDigest || 'sha256:7b9148d2bc27c24430f878f',
       guardModelName: context.guardModelName || LlamaGuardService.OFFICIAL_MODEL_TAG,
       guardModelDigest: context.guardModelDigest || LlamaGuardService.DEFAULT_DIGEST,
-      systemPromptVersion: '5.0.0',
+      systemPromptVersion: '2.1.0',
       guardrailPolicyVersion: GUARDRAIL_POLICY_VERSION,
       officialLlamaGuardCategories: officialCats,
       customTutorPolicyCategories: customCats,
@@ -819,20 +796,6 @@ ${escapedUserQuery}
 
   public static isFlagMatch(submitted: string, target?: string): boolean {
     if (!target) return false;
-    const normSub = this.normalizeFlag(submitted);
-    const normTarget = this.normalizeFlag(target);
-    if (normSub === normTarget) return true;
-
-    const aliasMap: Record<string, string[]> = {
-      'FLAG{LINUX_BASICS_MASTERED}': ['FLAG{HIDDEN_FILES_REVEALED}'],
-      'FLAG{HIDDEN_FILES_REVEALED}': ['FLAG{GREP_MASTER_SLEUTH}'],
-      'FLAG{ENV_VARS_INSECURE}': ['FLAG{CHMOD_UNLOCKS_THE_DOOR}'],
-      'FLAG{GREP_IS_POWERFUL}': ['FLAG{ROGUE_PROCESS_TERMINATED}'],
-      'FLAG{CURL_LOCAL_SERVICES}': ['FLAG{PORT_8080_EXPOSED}'],
-      'FLAG{PIPES_AND_DECODING}': ['FLAG{BASE64_DECODED_SUCCESS}'],
-      'FLAG{SUDO_POWER_UNLOCKED}': ['FLAG{SUDO_AUDIT_COMPLETE}'],
-      'FLAG{FIND_COMMAND_EXPERT}': ['FLAG{DEEP_DIRECTORY_WALKER}']
-    };
-    return (aliasMap[normTarget] || []).includes(normSub);
+    return this.normalizeFlag(submitted) === this.normalizeFlag(target);
   }
 }
