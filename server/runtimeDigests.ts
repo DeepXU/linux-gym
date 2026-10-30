@@ -1,7 +1,9 @@
 import crypto from 'crypto';
 import fs from 'fs';
-import { execSync } from 'child_process';
+import { execFileSync, execSync } from 'child_process';
 import path from 'path';
+import { DEFAULT_GUARD_MODEL, DEFAULT_OLLAMA_URL, DEFAULT_TUTOR_MODEL } from './protocolV5';
+import { SandboxProvider } from './sandboxProvider';
 
 export interface RuntimeDigests {
   applicationCommit: string;
@@ -10,6 +12,7 @@ export interface RuntimeDigests {
   guardModelDigest: string;
   ollamaVersion: string;
   dockerImageDigest: string;
+  sandboxImageDigest: string;
   systemPromptVersion: string;
   systemPromptDigest: string;
   guardrailPolicyVersion: string;
@@ -23,12 +26,20 @@ export interface RuntimeDigests {
   rawOutputs: Record<string, string>;
 }
 
+export interface ResolvedModelDigests {
+  tutorModel?: string;
+  guardModel?: string;
+  ollamaUrl?: string;
+  tutorDigest?: string;
+  guardDigest?: string;
+}
+
 export class RuntimeDigestService {
   private static sha256(data: string | Buffer): string {
     return 'sha256:' + crypto.createHash('sha256').update(data).digest('hex');
   }
 
-  public static getRuntimeDigests(): RuntimeDigests {
+  public static getRuntimeDigests(modelIdentity: ResolvedModelDigests = {}): RuntimeDigests {
     const commandsUsed: Record<string, string> = {};
     const rawOutputs: Record<string, string> = {};
 
@@ -53,28 +64,30 @@ export class RuntimeDigestService {
     }
 
     // 2. Ollama Version
-    let ollamaVersion = '0.5.7';
+    let ollamaVersion = 'unverified';
     commandsUsed.ollamaVersion = 'ollama --version';
     try {
       const out = execSync('ollama --version', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] }).trim();
-      ollamaVersion = out.replace(/.*version\s*/i, '').trim() || '0.5.7';
+      ollamaVersion = out.replace(/.*version\s*/i, '').trim() || 'unverified';
       rawOutputs.ollamaVersion = out;
     } catch {
-      rawOutputs.ollamaVersion = 'ollama command not found on PATH; using pinned baseline 0.5.7';
+      rawOutputs.ollamaVersion = 'Ollama version was not resolved from the runtime.';
     }
 
     // 3. Docker Image Digest
     let dockerImageDigest = '';
-    commandsUsed.dockerImageDigest = "docker inspect --format='{{index .RepoDigests 0}}' ubuntu:latest";
+    commandsUsed.dockerImageDigest = `docker image inspect --format={{.Id}} ${SandboxProvider.DEFAULT_DOCKER_IMAGE}`;
     try {
-      const out = execSync("docker inspect --format='{{index .RepoDigests 0}}' ubuntu:latest", { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] }).trim();
-      dockerImageDigest = out || '';
+      const out = execFileSync(
+        'docker',
+        ['image', 'inspect', '--format={{.Id}}', SandboxProvider.DEFAULT_DOCKER_IMAGE],
+        { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'], timeout: 2500 }
+      ).trim();
+      dockerImageDigest = /^sha256:[a-f0-9]{64}$/i.test(out) ? out : 'unverified';
       rawOutputs.dockerImageDigest = out;
     } catch {
-      const dockerfilePath = path.join(process.cwd(), 'Dockerfile');
-      const content = fs.existsSync(dockerfilePath) ? fs.readFileSync(dockerfilePath, 'utf8') : 'FROM ubuntu:24.04';
-      dockerImageDigest = this.sha256(content);
-      rawOutputs.dockerImageDigest = `(computed from Dockerfile specification: ${dockerImageDigest})`;
+      dockerImageDigest = 'unverified';
+      rawOutputs.dockerImageDigest = 'Docker image identity was not resolved from the live Docker daemon.';
     }
 
     // 4. System Prompt Digest
@@ -124,14 +137,13 @@ export class RuntimeDigestService {
     }
 
     // 8. Model Digests (Tutor & Guard)
-    let tutorModelDigest = '';
-    let guardModelDigest = '';
-    commandsUsed.tutorModelDigest = "curl -s http://localhost:2004/api/show -d '{\"name\":\"llama3.3:70b\"}'";
-    commandsUsed.guardModelDigest = "curl -s http://localhost:2004/api/show -d '{\"name\":\"llama-guard3:1b\"}'";
-
-    // Deterministic fallback digests derived from the pinned model definitions
-    tutorModelDigest = this.sha256(`ollama:llama3.3:70b:${ollamaVersion}`);
-    guardModelDigest = this.sha256(`ollama:llama-guard3:1b:${ollamaVersion}`);
+    const tutorModel = modelIdentity.tutorModel || process.env.OLLAMA_MODEL || DEFAULT_TUTOR_MODEL;
+    const guardModel = modelIdentity.guardModel || process.env.LLAMA_GUARD_MODEL || DEFAULT_GUARD_MODEL;
+    const ollamaUrl = modelIdentity.ollamaUrl || process.env.OLLAMA_BASE_URL || DEFAULT_OLLAMA_URL;
+    commandsUsed.tutorModelDigest = `GET ${ollamaUrl}/api/tags (model: ${tutorModel})`;
+    commandsUsed.guardModelDigest = `GET ${ollamaUrl}/api/tags (model: ${guardModel})`;
+    const tutorModelDigest = modelIdentity.tutorDigest || 'unverified';
+    const guardModelDigest = modelIdentity.guardDigest || 'unverified';
     rawOutputs.tutorModelDigest = tutorModelDigest;
     rawOutputs.guardModelDigest = guardModelDigest;
 
@@ -142,6 +154,7 @@ export class RuntimeDigestService {
       guardModelDigest,
       ollamaVersion,
       dockerImageDigest,
+      sandboxImageDigest: dockerImageDigest,
       systemPromptVersion: '2.0.0',
       systemPromptDigest,
       guardrailPolicyVersion: '2.1.0',

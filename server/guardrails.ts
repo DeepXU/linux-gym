@@ -12,6 +12,7 @@ import {
   CorpusExecutionSummary,
   GuardrailCorpusItem
 } from './guardrailCorpus';
+import { DEFAULT_TUTOR_MODEL } from './protocolV5';
 
 export const GUARDRAIL_POLICY_VERSION = '2.1.0';
 
@@ -757,8 +758,8 @@ ${escapedUserQuery}
       sessionId: context.sessionId || 'anonymous-session',
       taskId: context.taskId || 1,
       testingStage: context.testingStage,
-      tutorModelName: context.tutorModelName || 'llama3.3:70b',
-      tutorModelDigest: context.tutorModelDigest || 'sha256:7b9148d2bc27c24430f878f',
+      tutorModelName: context.tutorModelName || DEFAULT_TUTOR_MODEL,
+      tutorModelDigest: context.tutorModelDigest || 'unverified',
       guardModelName: context.guardModelName || LlamaGuardService.OFFICIAL_MODEL_TAG,
       guardModelDigest: context.guardModelDigest || LlamaGuardService.DEFAULT_DIGEST,
       systemPromptVersion: '2.1.0',

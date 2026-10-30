@@ -1,33 +1,6 @@
 {
   "version": "2.0.0",
-  "users": {
-    "admin": {
-      "user": {
-        "id": "student-jjngr1s",
-        "username": "admin",
-        "role": "student",
-        "condition": "guided"
-      },
-      "passwordHash": "admin"
-    },
-    "faculty_reviewer": {
-      "user": {
-        "id": "evaluator-fac1",
-        "username": "faculty_reviewer",
-        "role": "evaluator"
-      },
-      "passwordHash": "faculty"
-    },
-    "demo_cadet": {
-      "user": {
-        "id": "student-ajosp3n",
-        "username": "demo_cadet",
-        "role": "student",
-        "condition": "guided"
-      },
-      "passwordHash": "password"
-    }
-  },
+  "users": {},
   "levels": [
     {
       "id": 1,

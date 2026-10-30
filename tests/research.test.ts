@@ -616,14 +616,23 @@ describe('Research Protocol Validation & Production Suite (Protocol V5.0.0 & Bas
     assert.strictEqual(outcomeB.latestExecutionMeetsRatingFloor, true);
   });
 
-  it('SandboxProvider: Executes all 8 task smoke tests twice from clean state (16/16 isolated executions)', () => {
+  it('SandboxProvider: Requires genuine Docker execution for all 8 tasks and never passes host fixtures', () => {
     const smokeSuite = SandboxProvider.runAllEightTaskSmokeTestsTwice(true);
     assert.strictEqual(smokeSuite.length, 8, 'Must execute all 8 tasks twice from clean state');
+    const dockerAvailable = SandboxProvider.isDockerDaemonAvailable();
     for (const r of smokeSuite) {
-      assert.strictEqual(r.cleanRun1Passed, true, `Task ${r.taskId} Run 1 failed: ${r.evidenceSummary}`);
-      assert.strictEqual(r.resetVerified, true, `Task ${r.taskId} reset verification failed`);
-      assert.strictEqual(r.cleanRun2Passed, true, `Task ${r.taskId} Run 2 failed: ${r.evidenceSummary}`);
-      assert.strictEqual(r.overallPassed, true, `Task ${r.taskId} overall smoke test failed`);
+      assert.strictEqual(r.verifiedWithRealDocker, dockerAvailable);
+      if (dockerAvailable) {
+        assert.strictEqual(r.executionBackend, 'docker_container');
+        assert.strictEqual(r.cleanRun1Passed, true, `Task ${r.taskId} Run 1 failed: ${r.evidenceSummary}`);
+        assert.strictEqual(r.resetVerified, true, `Task ${r.taskId} reset verification failed`);
+        assert.strictEqual(r.cleanRun2Passed, true, `Task ${r.taskId} Run 2 failed: ${r.evidenceSummary}`);
+        assert.strictEqual(r.leakedContainers.length, 0);
+        assert.strictEqual(r.overallPassed, true, `Task ${r.taskId} overall smoke test failed`);
+      } else {
+        assert.strictEqual(r.executionBackend, 'unavailable');
+        assert.strictEqual(r.overallPassed, false);
+      }
     }
   });
 
@@ -753,4 +762,3 @@ describe('Research Protocol Validation & Production Suite (Protocol V5.0.0 & Bas
   });
 
 });
-

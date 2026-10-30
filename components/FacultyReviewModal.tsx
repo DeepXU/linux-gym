@@ -9,6 +9,7 @@ import {
 } from '../types';
 
 import { INITIAL_LEVELS } from '../constants';
+import { authService } from '../services/authService';
 
 interface FacultyReviewModalProps {
   isOpen: boolean;
@@ -94,7 +95,7 @@ export const FacultyReviewModal: React.FC<FacultyReviewModalProps> = ({
   const [failureExplanation, setFailureExplanation] = useState<string>('');
   const [dimensionJustifications, setDimensionJustifications] = useState<Record<string, string>>({});
   const [criticalFailureEvidenceQuotes, setCriticalFailureEvidenceQuotes] = useState<Record<string, string>>({});
-  const [recordIntegrityPassed, setRecordIntegrityPassed] = useState<boolean>(true);
+  const [recordIntegrityPassed, setRecordIntegrityPassed] = useState<boolean>(false);
   const [uncertaintyFlag, setUncertaintyFlag] = useState<boolean>(false);
   const [recentEvents, setRecentEvents] = useState<TelemetryEvent[]>([]);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
@@ -102,22 +103,28 @@ export const FacultyReviewModal: React.FC<FacultyReviewModalProps> = ({
 
   useEffect(() => {
     if (isOpen) {
-      fetch(`/api/telemetry/events?taskId=${currentTask.id}`)
+      authService.fetchAuthenticated(`/api/telemetry/events?taskId=${currentTask.id}`)
         .then(r => (r.ok ? r.json() : []))
         .then(data => setRecentEvents(Array.isArray(data) ? data.slice(-8) : []))
         .catch(() => setRecentEvents([]));
 
-      fetch(`/api/integrity?testCaseId=${encodeURIComponent(testCaseId)}`)
-        .then(r => (r.ok ? r.json() : []))
+      authService.fetchAuthenticated(`/api/integrity?testCaseId=${encodeURIComponent(testCaseId)}`)
+        .then(async r => {
+          if (!r.ok) throw new Error(`Integrity verification unavailable (HTTP ${r.status}).`);
+          return r.json();
+        })
         .then((reports: any[]) => {
           if (Array.isArray(reports) && reports.length > 0) {
             const latest = reports[reports.length - 1];
             setRecordIntegrityPassed(Boolean(latest.recordIntegrityPassed));
           } else {
-            setRecordIntegrityPassed(true);
+            setRecordIntegrityPassed(false);
           }
         })
-        .catch(() => setRecordIntegrityPassed(true));
+        .catch((error: Error) => {
+          setRecordIntegrityPassed(false);
+          setErrorMsg(error.message);
+        });
     }
   }, [isOpen, currentTask.id, testCaseId]);
 
@@ -207,7 +214,7 @@ export const FacultyReviewModal: React.FC<FacultyReviewModalProps> = ({
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (token) headers['Authorization'] = `Bearer ${token}`;
 
-      const res = await fetch('/api/reviews', {
+      const res = await authService.fetchAuthenticated('/api/reviews', {
         method: 'POST',
         headers,
         body: JSON.stringify(reviewPayload)

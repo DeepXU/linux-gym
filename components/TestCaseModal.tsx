@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { X, Play, CheckCircle2, XCircle, RefreshCw, ListChecks, Lock, Unlock, ShieldCheck } from 'lucide-react';
 import { TestCase, GroundTruthRecord, PublicSequesteredCaseView } from '../types';
+import { authService } from '../services/authService';
 
 interface TestCaseModalProps {
   isOpen: boolean;
@@ -38,7 +39,7 @@ export const TestCaseModal: React.FC<TestCaseModalProps> = ({
 
   const fetchTestCases = async () => {
     try {
-      const res = await fetch('/api/test-cases');
+      const res = await fetch('/api/test-cases', { headers: authService.getAuthHeaders() });
       if (res.ok) {
         const data = await res.json();
         setTestCases(data);
@@ -53,7 +54,7 @@ export const TestCaseModal: React.FC<TestCaseModalProps> = ({
 
   const fetchGroundTruth = async () => {
     try {
-      const res = await fetch('/api/ground-truth');
+      const res = await fetch('/api/ground-truth', { headers: authService.getAuthHeaders() });
       if (res.ok) {
         const list: GroundTruthRecord[] = await res.json();
         const map: Record<string, GroundTruthRecord> = {};
@@ -61,6 +62,9 @@ export const TestCaseModal: React.FC<TestCaseModalProps> = ({
           map[gt.caseId] = gt;
         });
         setGroundTruthMap(map);
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setStatusMessage(data.error || `Ground-truth records are unavailable (HTTP ${res.status}).`);
       }
     } catch (e) {
       console.error('Failed to load ground truth records:', e);
@@ -69,11 +73,14 @@ export const TestCaseModal: React.FC<TestCaseModalProps> = ({
 
   const fetchSequestered = async () => {
     try {
-      const res = await fetch('/api/sequestered-cases');
+      const res = await fetch('/api/sequestered-cases', { headers: authService.getAuthHeaders() });
       if (res.ok) {
         const data = await res.json();
         setKnownCaseRegressionComplete(Boolean(data.knownCaseRegressionComplete));
         setSequesteredCases(data.cases || []);
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setStatusMessage(data.error || `Sequestered cases are unavailable (HTTP ${res.status}).`);
       }
     } catch (e) {
       console.error('Failed to load sequestered cases:', e);
@@ -86,7 +93,7 @@ export const TestCaseModal: React.FC<TestCaseModalProps> = ({
     try {
       const res = await fetch(`/api/ground-truth/${encodeURIComponent(caseId)}/verify`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authService.getAuthHeaders(),
         body: JSON.stringify({ verifiedBy: 'investigator-evaluator' })
       });
       const data = await res.json();
@@ -107,7 +114,7 @@ export const TestCaseModal: React.FC<TestCaseModalProps> = ({
     try {
       const res = await fetch('/api/sequestered-cases/regression-complete', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authService.getAuthHeaders(),
         body: JSON.stringify({ complete })
       });
       if (res.ok) {
@@ -117,6 +124,9 @@ export const TestCaseModal: React.FC<TestCaseModalProps> = ({
             ? 'Known-case regression marked COMPLETE. Sequestered cases (SQ-01..SQ-06) may now be released.'
             : 'Known-case regression marked INCOMPLETE. Sequestered cases remain locked.'
         );
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setStatusMessage(data.error || `Regression state was not changed (HTTP ${res.status}).`);
       }
     } catch (e: any) {
       setStatusMessage(`Error updating regression status: ${e.message}`);
@@ -128,7 +138,7 @@ export const TestCaseModal: React.FC<TestCaseModalProps> = ({
     try {
       const res = await fetch('/api/sequestered-cases/release', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authService.getAuthHeaders(),
         body: JSON.stringify({ releasedBy: 'investigator-evaluator' })
       });
       const data = await res.json();
@@ -152,7 +162,7 @@ export const TestCaseModal: React.FC<TestCaseModalProps> = ({
     try {
       const res = await fetch('/api/sequestered-cases/run', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authService.getAuthHeaders(),
         body: JSON.stringify({ runId: 'sequestered_acceptance' })
       });
       const data = await res.json();
@@ -177,7 +187,7 @@ export const TestCaseModal: React.FC<TestCaseModalProps> = ({
     try {
       const res = await fetch('/api/test-cases/consistency-run', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
+        headers: authService.getAuthHeaders()
       });
       if (res.ok) {
         const data = await res.json();
@@ -198,7 +208,7 @@ export const TestCaseModal: React.FC<TestCaseModalProps> = ({
     try {
       const res = await fetch('/api/test-cases/run', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authService.getAuthHeaders(),
         body: JSON.stringify({ testCaseId: tcId, runId: activeRunId })
       });
       const out = await res.json();
@@ -222,7 +232,7 @@ export const TestCaseModal: React.FC<TestCaseModalProps> = ({
     try {
       const res = await fetch('/api/test-cases/batch', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authService.getAuthHeaders(),
         body: JSON.stringify({ runId: activeRunId })
       });
       if (res.ok) {
@@ -611,4 +621,3 @@ export const TestCaseModal: React.FC<TestCaseModalProps> = ({
     </div>
   );
 };
-

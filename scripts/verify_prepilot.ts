@@ -4,6 +4,8 @@ import path from 'path';
 import { SandboxProvider } from '../server/sandboxProvider';
 import { RuntimeDigestService } from '../server/runtimeDigests';
 import { db } from '../server/db';
+import { runFreezePreflight } from '../server/researchGovernance';
+import { verifyOllamaModels } from '../server/ollamaModelVerification';
 
 interface PrePilotStepResult {
   stepId: string;
@@ -160,10 +162,24 @@ async function main() {
 
   // 6. Real Local Ollama & Model Digest Verification
   const digestStart = Date.now();
-  const digests = RuntimeDigestService.getRuntimeDigests();
+  const config = db.getConfig();
+  const modelVerification = await verifyOllamaModels({
+    baseUrl: config?.ollamaUrl,
+    tutorModel: config?.ollamaModel || config?.tutorModel,
+    guardModel: config?.llamaGuardModel
+  });
+  const digests = RuntimeDigestService.getRuntimeDigests({
+    tutorModel: config?.ollamaModel || config?.tutorModel,
+    guardModel: config?.llamaGuardModel,
+    ollamaUrl: config?.ollamaUrl,
+    tutorDigest: modelVerification.tutorDigest,
+    guardDigest: modelVerification.guardDigest
+  });
   const digestEnd = Date.now();
   const realOllamaVerified =
-    !digests.tutorModelDigest.includes('unverified') && !digests.guardModelDigest.includes('unverified');
+    modelVerification.reachable &&
+    Boolean(modelVerification.tutorDigest) &&
+    Boolean(modelVerification.guardDigest);
 
   steps.push({
     stepId: 'STEP-06-REAL-OLLAMA-MODELS',
@@ -178,16 +194,26 @@ async function main() {
     evidencePath: 'server/runtimeDigests.ts',
     reason: realOllamaVerified
       ? `Resolved live Ollama digests: tutor=${digests.tutorModelDigest}, guard=${digests.guardModelDigest}`
-      : 'Local Ollama daemon is not running in this build container. Must be verified on the Ubuntu VM (student@llm).'
+      : modelVerification.detail
   });
 
   // 7. Freeze Preflight Gate Check
   const preflightStart = Date.now();
-  const preflight = db.runPreflightCheck('PILOT_ACTIVE', false);
+  const preflight = await runFreezePreflight({
+    targetState: 'PILOT_ACTIVE',
+    researchMode: 'capability_evaluation',
+    config: db.getConfig(),
+    users: db.getUsers(),
+    testCases: db.getTestCases(),
+    groundTruth: [],
+    sequesteredCases: [],
+    defects: db.getDefects(),
+    dataDir: path.join(process.cwd(), 'data')
+  });
   const preflightEnd = Date.now();
   steps.push({
     stepId: 'STEP-07-FREEZE-PREFLIGHT',
-    name: 'Server-Authoritative 23-Point Freeze Preflight Gate',
+    name: 'Server-Authoritative 24-Point Freeze Preflight Gate',
     command: 'POST /api/governance/preflight',
     startTime: new Date(preflightStart).toISOString(),
     endTime: new Date(preflightEnd).toISOString(),
@@ -207,11 +233,9 @@ async function main() {
   const suiteEnd = new Date().toISOString();
   const hasFailed = steps.some(s => s.status === 'FAIL');
   const hasSkippedMandatory = steps.some(s => s.status === 'SKIP');
-  const gov = db.getGovernanceState();
-
   let decision: 'NOT READY' | 'PILOT READY' | 'FORMAL COLLECTION READY' = 'NOT READY';
-  if (!hasFailed && !hasSkippedMandatory) {
-    decision = gov.currentState === 'FORMAL_LOCKED' ? 'FORMAL COLLECTION READY' : 'PILOT READY';
+  if (!hasFailed && !hasSkippedMandatory && preflight.allMandatoryPassed) {
+    decision = 'PILOT READY';
   }
 
   const reportJson = {

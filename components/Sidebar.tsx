@@ -29,8 +29,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenGoogleDocExport
 }) => {
   
-  const handleDownloadLogs = () => {
-    terminalService.downloadLogs();
+  const handleDownloadLogs = async () => {
+    try {
+      await terminalService.downloadLogs();
+    } catch (error) {
+      alert(`Research export failed: ${(error as Error).message}`);
+    }
   };
 
   return (
@@ -165,14 +169,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </button>
           )}
         </div>
-        <button 
-           onClick={handleDownloadLogs}
-           className="w-full flex items-center justify-center gap-1.5 text-[11px] font-semibold bg-slate-900 hover:bg-slate-800 text-slate-300 py-1.5 px-2 rounded border border-slate-800 transition-all"
-           title="Download complete 15-table research archive (ZIP with CSV + JSON + SHA-256)"
-        >
-           <Download size={12} />
-           Export 15-Table Research Archive
-        </button>
+        {user.role !== 'student' && (
+          <button
+            onClick={handleDownloadLogs}
+            className="w-full flex items-center justify-center gap-1.5 text-[11px] font-semibold bg-slate-900 hover:bg-slate-800 text-slate-300 py-1.5 px-2 rounded border border-slate-800 transition-all"
+            title="Download the authenticated research package"
+          >
+            <Download size={12} />
+            Export Research Package
+          </button>
+        )}
       </div>
     </div>
   );

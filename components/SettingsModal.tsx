@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { X, Save, Server, Cloud, Cpu, Box, Globe, ShieldCheck, Lock, Unlock, CheckCircle, Users, RefreshCw, Key, Edit, Trash, Plus, FileText, HelpCircle, Flag, Download, Upload, Layers } from 'lucide-react';
+import { X, Save, Server, Cloud, Cpu, Box, Globe, ShieldCheck, Lock, CheckCircle, Users, RefreshCw, Key, Edit, Trash, Plus, FileText, HelpCircle, Flag, Download, Upload, Layers } from 'lucide-react';
 import { AIConfig, AIProvider, User, Level, Difficulty, FormalRun, ResearchConfiguration } from '../types';
 import { authService } from '../services/authService';
 import { levelService } from '../services/levelService';
@@ -65,50 +65,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   // Research State
   const [activeRun, setActiveRun] = useState<FormalRun | null>(null);
-  const [runName, setRunName] = useState('Evaluation Run 2026');
-  const [runType, setRunType] = useState<'formal' | 'pilot' | 'regression' | 'demonstration'>('formal');
   const [exportRunFilter, setExportRunFilter] = useState('');
   const [exportStripFreeText, setExportStripFreeText] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
 
   const fetchActiveRun = async () => {
     try {
-      const res = await fetch('/api/runs/active');
+      const res = await authService.fetchAuthenticated('/api/runs/active');
       if (res.ok) {
         const data = await res.json();
         setActiveRun(data);
       }
     } catch (e) {
       console.error('Failed to fetch active run:', e);
-    }
-  };
-
-  const handleCreateRun = async () => {
-    try {
-      const res = await fetch('/api/runs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          runName,
-          runType,
-          activeTaskIds: [1, 2, 3, 4, 5, 6, 7, 8]
-        })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setActiveRun(data);
-      }
-    } catch (e) {
-      console.error('Failed to create formal run:', e);
-    }
-  };
-
-  const handleUnlockRun = async () => {
-    try {
-      await fetch('/api/runs/unlock', { method: 'POST' });
-      fetchActiveRun();
-    } catch (e) {
-      console.error('Failed to unlock run:', e);
     }
   };
 
@@ -119,7 +88,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       if (exportRunFilter) params.append('runId', exportRunFilter);
       if (exportStripFreeText) params.append('stripFreeText', 'true');
       
-      const response = await fetch(`/api/export/research-package?${params.toString()}`);
+      const response = await authService.fetchAuthenticated(`/api/export/research-package?${params.toString()}`);
       if (!response.ok) throw new Error('Failed to generate export package');
       
       const blob = await response.blob();
@@ -145,24 +114,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   };
 
   const handleChangePassword = () => {
-     if (newPassword !== confirmPassword) {
-       setPasswordMsg({ type: 'error', text: 'Passwords do not match' });
-       return;
-     }
-     try {
-       authService.changeAdminPassword(newPassword);
-       setPasswordMsg({ type: 'success', text: 'Password updated successfully' });
-       setNewPassword('');
-       setConfirmPassword('');
-     } catch (e: any) {
-       setPasswordMsg({ type: 'error', text: e.message });
-     }
+    setPasswordMsg({
+      type: 'error',
+      text: 'Password changes are enforced on the server. This client does not store or mutate admin passwords locally.'
+    });
+    setNewPassword('');
+    setConfirmPassword('');
   };
 
-  const handleResetStudentPass = () => {
+  const handleResetStudentPass = async () => {
     if (!selectedStudent || !resetPassValue) return;
     try {
-      authService.resetStudentPassword(selectedStudent, resetPassValue);
+      await authService.resetStudentPassword(selectedStudent, resetPassValue);
       setResetMsg(`Success: Password for ${selectedStudent} reset.`);
       setResetPassValue('');
       setTimeout(() => setResetMsg(''), 3000);
@@ -481,7 +444,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                          <div>
                             <div className="flex justify-between items-center mb-1">
                                <label className="block text-[10px] text-slate-400">System Context (Hidden Prompt for AI)</label>
-                               <span className="text-[10px] text-yellow-500 flex items-center gap-1"><HelpCircle size={10} /> Defines the simulation environment</span>
+                               <span className="text-[10px] text-yellow-500 flex items-center gap-1"><HelpCircle size={10} /> Defines the live execution environment</span>
                             </div>
                             <textarea 
                               value={editingLevel?.systemContext} 
@@ -605,27 +568,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
             {activeTab === 'security' && (
               <div className="space-y-4">
-                 <label className="text-xs font-semibold text-red-400 uppercase tracking-wider">Change Admin Password</label>
-                 
-                 <div className="space-y-3">
-                   <div>
-                     <label className="block text-[10px] text-slate-400 mb-1">New Password</label>
-                     <input
-                       type="password"
-                       value={newPassword}
-                       onChange={(e) => setNewPassword(e.target.value)}
-                       className="w-full bg-slate-900 border border-slate-700 rounded p-3 text-sm focus:border-red-500 outline-none"
-                     />
-                   </div>
-                   <div>
-                     <label className="block text-[10px] text-slate-400 mb-1">Confirm Password</label>
-                     <input
-                       type="password"
-                       value={confirmPassword}
-                       onChange={(e) => setConfirmPassword(e.target.value)}
-                       className="w-full bg-slate-900 border border-slate-700 rounded p-3 text-sm focus:border-red-500 outline-none"
-                     />
-                   </div>
+                 <label className="text-xs font-semibold text-red-400 uppercase tracking-wider">Administrative Security</label>
+
+                 <div className="rounded-lg border border-red-900/40 bg-red-950/20 p-4 space-y-3">
+                   <p className="text-xs text-red-200 font-medium">Server-side credentials only</p>
+                   <p className="text-xs text-slate-300 leading-relaxed">
+                     Password changes are enforced by the authenticated server configuration. The client no longer stores or mutates administrator credentials in browser memory.
+                   </p>
+                   <p className="text-[10px] text-slate-400">
+                     Configure <span className="font-mono text-slate-300">ADMIN_INITIAL_PASSWORD</span> at startup or rotate credentials with an authenticated admin endpoint before launch.
+                   </p>
                  </div>
 
                  {passwordMsg && (
@@ -636,14 +588,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                      {passwordMsg.text}
                    </div>
                  )}
-                 
+
                  <div className="pt-2">
                    <button 
                      type="button" 
                      onClick={handleChangePassword}
                      className="bg-red-900/30 hover:bg-red-900/50 text-red-200 border border-red-900/50 text-xs px-4 py-2 rounded transition-colors"
                    >
-                     Update Password
+                     Show Security Guidance
                    </button>
                  </div>
               </div>
@@ -659,7 +611,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   onChange={(e) => setLocalConfig({ ...localConfig, apiKey: e.target.value })}
                   className="w-full bg-slate-900 border border-slate-700 rounded p-3 text-sm focus:border-blue-500 outline-none transition-colors"
                 />
-                <p className="text-[10px] text-slate-500">Uses 'gemini-3-flash-preview' by default.</p>
+                <p className="text-[10px] text-slate-500">Gemini is optional; the local Ollama configuration is the current default.</p>
               </div>
             )}
 
@@ -682,14 +634,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                      </button>
                      <button
                        type="button"
-                       onClick={() => setLocalConfig({ ...localConfig, ollamaUrl: 'http://localhost:11434' })}
+                       onClick={() => setLocalConfig({ ...localConfig, ollamaUrl: 'http://127.0.0.1:11434' })}
                        className={`px-2 py-0.5 rounded text-[10px] font-mono border transition-colors ${
-                         localConfig.ollamaUrl === 'http://localhost:11434'
+                         localConfig.ollamaUrl === 'http://127.0.0.1:11434'
                            ? 'bg-orange-500/20 border-orange-500 text-orange-300'
                            : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-slate-200'
                        }`}
                      >
-                       :11434 (Default VM)
+                       Standard Ollama
                      </button>
                    </div>
                  </div>
@@ -776,8 +728,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                  </div>
 
                  <div className="text-[10px] text-orange-300/60 bg-orange-900/10 p-3 rounded border border-orange-900/20 leading-relaxed font-mono">
-                    <p className="font-bold mb-1">Lab/Classroom Setup (Port 2004 or Default 11434):</p>
-                    <code>OLLAMA_HOST=0.0.0.0:2004 OLLAMA_ORIGINS="*" OLLAMA_NUM_PARALLEL=16 ollama serve</code>
+                    <p className="font-bold mb-1">Host-run Ollama (loopback only):</p>
+                    <code>OLLAMA_HOST=127.0.0.1:2004 OLLAMA_NUM_PARALLEL=16 ollama serve</code>
                  </div>
               </div>
             )}
@@ -883,81 +835,37 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     </span>
                   ) : (
                     <span className="flex items-center gap-1 text-xs bg-slate-800 text-slate-300 px-2.5 py-1 rounded">
-                      <Unlock size={12} /> Unlocked (Pilot Mode)
+                      No active locked run
                     </span>
                   )}
                 </div>
 
-                {/* Application Baseline Version & Freeze Status */}
+                {/* Application Version & Research Readiness */}
                 <div className="p-3.5 bg-slate-950/80 rounded-lg border border-slate-800 flex items-center justify-between">
                   <div className="flex items-center gap-3">
-                    <div className="p-2 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-emerald-400 font-mono font-bold text-xs">
+                    <div className="p-2 bg-amber-500/10 border border-amber-500/30 rounded-lg text-amber-300 font-mono font-bold text-xs">
                       v1.0.0
                     </div>
                     <div>
                       <div className="flex items-center gap-2">
                         <span className="text-xs font-semibold text-white">Application Version: 1.0.0</span>
-                        <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-950/80 text-emerald-300 border border-emerald-800/60 font-mono">
-                          Research Baseline Freeze 1
+                        <span className="text-[10px] px-2 py-0.5 rounded bg-amber-950/80 text-amber-300 border border-amber-800/60 font-mono">
+                          NOT READY FOR COLLECTION
                         </span>
                       </div>
                       <p className="text-[10px] text-slate-400 mt-0.5">
-                        This baseline version is formally frozen for experimental recording and baseline observations. Subsequent refixes and interventions will record under v1.1.0+ for comparative analysis.
+                        Ground-truth verification, sequestered-case workflows, and governance transitions are not implemented.
                       </p>
                     </div>
                   </div>
                   <div className="text-right shrink-0">
                     <span className="text-[10px] text-slate-500 block">Protocol Version</span>
-                    <span className="text-xs font-mono text-slate-300">1.0.0</span>
+                    <span className="text-xs font-mono text-slate-300">V5.0.0</span>
                   </div>
                 </div>
 
-                {/* Create or Manage Run */}
-                <div className="p-4 bg-slate-900 rounded-lg border border-slate-800 space-y-3">
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                    <div>
-                      <label className="block text-[10px] text-slate-400 mb-1">Run Name</label>
-                      <input
-                        type="text"
-                        value={runName}
-                        onChange={(e) => setRunName(e.target.value)}
-                        className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-xs text-slate-200"
-                        placeholder="Evaluation Run 2026"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] text-slate-400 mb-1">Run Classification</label>
-                      <select
-                        value={runType}
-                        onChange={(e) => setRunType(e.target.value as any)}
-                        className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-xs text-slate-200"
-                      >
-                        <option value="formal">Formal Evaluation (Production/Paper)</option>
-                        <option value="pilot">Pilot Study</option>
-                        <option value="regression">Regression Suite</option>
-                        <option value="demonstration">Demonstration</option>
-                      </select>
-                    </div>
-                    <div className="flex items-end gap-2">
-                      <button
-                        type="button"
-                        onClick={handleCreateRun}
-                        className="w-full py-2 bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs rounded shadow flex items-center justify-center gap-1"
-                      >
-                        <Lock size={13} /> Freeze & Lock Run
-                      </button>
-                      {activeRun?.isLocked && (
-                        <button
-                          type="button"
-                          onClick={handleUnlockRun}
-                          className="py-2 px-3 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs rounded"
-                          title="Unlock run"
-                        >
-                          <Unlock size={13} />
-                        </button>
-                      )}
-                    </div>
-                  </div>
+                <div className="p-4 bg-amber-950/30 rounded-lg border border-amber-900/50 text-xs text-amber-200">
+                  Run creation, locking, and unlocking are disabled because their server-authoritative governance workflow is not implemented. Do not collect participant data with this build.
                 </div>
 
                 {/* Model Separation: Tutor vs Evaluator */}

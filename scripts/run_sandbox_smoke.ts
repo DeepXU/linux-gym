@@ -2,12 +2,14 @@ import { SandboxProvider } from '../server/sandboxProvider';
 
 async function main() {
   const startTime = new Date().toISOString();
+  const results = SandboxProvider.runAllEightTaskSmokeTestsTwice(true);
   const health = SandboxProvider.checkHealth();
-  const results = SandboxProvider.runAllEightTaskSmokeTestsTwice();
   const endTime = new Date().toISOString();
 
-  const allPassed = results.length === 8 && results.every(r => r.overallPassed);
-  const allVerifiedWithRealDocker = results.every(r => r.verifiedWithRealDocker);
+  const allVerifiedWithRealDocker =
+    results.length === 8 &&
+    results.every(r => r.verifiedWithRealDocker && r.executionBackend === 'docker_container');
+  const allPassed = allVerifiedWithRealDocker && results.every(r => r.overallPassed && r.leakedContainers.length === 0);
 
   const summary = {
     startTime,

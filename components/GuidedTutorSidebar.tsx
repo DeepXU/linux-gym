@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Bot, Send, HelpCircle, ShieldAlert, Sparkles, Terminal as TerminalIcon } from 'lucide-react';
 import { Level, User } from '../types';
 import { INITIAL_LEVELS } from '../constants';
+import { authService } from '../services/authService';
 
 interface TutorTurn {
   id: string;
@@ -63,7 +64,7 @@ export const GuidedTutorSidebar: React.FC<GuidedTutorSidebarProps> = ({
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
 
-      const res = await fetch('/api/ai/chat', {
+      const res = await authService.fetchAuthenticated('/api/ai/chat', {
         method: 'POST',
         headers,
         body: JSON.stringify({
@@ -108,7 +109,7 @@ export const GuidedTutorSidebar: React.FC<GuidedTutorSidebarProps> = ({
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
 
-      const res = await fetch('/api/hints/request', {
+      const res = await authService.fetchAuthenticated('/api/hints/request', {
         method: 'POST',
         headers,
         body: JSON.stringify({

@@ -222,7 +222,7 @@ export async function generateAITutorResponse(options: AIGenerationOptions): Pro
   const isOllamaConfigured = explicitProvider === 'ollama' || (!process.env.GEMINI_API_KEY && !config.apiKey && explicitProvider !== 'gemini' && !isCustomOrVllm);
   if (isOllamaConfigured) {
     const ollamaUrl = config.ollamaUrl || config.ollamaBaseUrl || process.env.OLLAMA_BASE_URL || 'http://localhost:2004';
-    const ollamaModel = config.ollamaModel || process.env.OLLAMA_MODEL || 'llama3.3:70b';
+    const ollamaModel = config.ollamaModel || process.env.OLLAMA_MODEL || 'qwen2.5-coder:7b';
     try {
       const reply = await callOllamaChat({
         baseUrl: ollamaUrl,
@@ -241,7 +241,11 @@ export async function generateAITutorResponse(options: AIGenerationOptions): Pro
 
   // 3. Google Gemini Provider
   const activeRun = db.getActiveRun();
-  const isFormalOrPilot = options.isFormalRun ?? (activeRun?.runType === 'formal' || activeRun?.runType === 'pilot');
+  const isFormalOrPilot = options.isFormalRun ?? Boolean(
+    activeRun?.isLocked &&
+    ['formal', 'formal_round_1', 'pilot', 'regression', 'sequestered', 'FORMAL_CAPABILITY', 'CAPABILITY_PILOT']
+      .includes(activeRun.runType)
+  );
   if (isFormalOrPilot) {
     throw new Error('CONFIGURATION_ERROR: Pinned local tutor model is unavailable during formal evaluation or student pilot.');
   }

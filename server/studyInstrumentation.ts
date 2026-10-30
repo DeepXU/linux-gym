@@ -580,7 +580,7 @@ export function evaluateExecutionRecordIntegrity(ctx: IntegrityEvaluationContext
   const containerDigestVal =
     (execution as any).sandboxImageDigest !== undefined
       ? (execution as any).sandboxImageDigest
-      : primaryInt?.containerImageDigest || manifest?.sandboxImageDigest || 'sha256:sandbox';
+      : primaryInt?.containerImageDigest || manifest?.sandboxImageDigest || 'unverified';
   const configPassed = Boolean(
     providerVal &&
       modelVal &&

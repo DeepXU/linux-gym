@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { X, CheckCircle, Eye } from 'lucide-react';
 import { CEWSubmission, CEWScore } from '../types';
+import { authService } from '../services/authService';
 
 interface CEWReviewModalProps {
   isOpen: boolean;
@@ -68,7 +69,7 @@ export const CEWReviewModal: React.FC<CEWReviewModalProps> = ({
         feedbackCategory: 'manual_expert_review'
       };
       
-      const res = await fetch('/api/cew/expert-score', {
+      const res = await authService.fetchAuthenticated('/api/cew/expert-score', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)

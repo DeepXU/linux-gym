@@ -97,10 +97,10 @@ const App: React.FC = () => {
     window.addEventListener('mouseup', handleMouseUp);
   };
 
-  // Default configuration: Local Ollama (http://127.0.0.1:11434, qwen2.5-coder:7b)
+  // Default configuration: Local Ollama (http://127.0.0.1:2004, qwen2.5-coder:7b)
   const [aiConfig, setAiConfig] = useState<AIConfig>({
     provider: 'ollama',
-    ollamaUrl: 'http://127.0.0.1:11434',
+    ollamaUrl: 'http://127.0.0.1:2004',
     ollamaModel: 'qwen2.5-coder:7b',
     tutorProvider: 'ollama',
     tutorModel: 'qwen2.5-coder:7b',
@@ -110,7 +110,7 @@ const App: React.FC = () => {
 
   const loadTerminalHistory = async (taskId: number) => {
     try {
-      const res = await fetch(`/api/terminal/history?taskId=${taskId}`);
+      const res = await authService.fetchAuthenticated(`/api/terminal/history?taskId=${taskId}`);
       if (res.ok) {
         const data = await res.json();
         setTerminalHistory({
@@ -129,16 +129,9 @@ const App: React.FC = () => {
     const initializeData = async () => {
       await authService.initFromServer();
       
-      // Load config and deployment profile
+      // Deployment health is public; private configuration is loaded after investigator authentication.
       try {
-        const [configRes, healthRes] = await Promise.all([
-          fetch('/api/config'),
-          fetch('/api/health')
-        ]);
-        if (configRes.ok) {
-          const cfgData = await configRes.json();
-          if (cfgData) setAiConfig(cfgData);
-        }
+        const healthRes = await fetch('/api/health');
         if (healthRes.ok) {
           const healthData = await healthRes.json();
           if (healthData.deploymentProfile) {
@@ -173,6 +166,21 @@ const App: React.FC = () => {
         setLevels(loadedLevels);
     });
   }, []);
+
+  useEffect(() => {
+    if (!user || user.role === 'student') return;
+    let active = true;
+    authService.fetchAuthenticated('/api/config')
+      .then(async response => {
+        if (!response.ok) throw new Error(`Failed to load configuration (HTTP ${response.status}).`);
+        const config = await response.json();
+        if (active && config) setAiConfig(config);
+      })
+      .catch((error: Error) => console.error(error.message));
+    return () => {
+      active = false;
+    };
+  }, [user]);
 
   // Load level on start or change, ONLY if user is logged in
   useEffect(() => {
@@ -278,7 +286,7 @@ const App: React.FC = () => {
       addLine('', 'output'); // Spacer
 
     } catch (e) {
-      addLine(`Error initializing simulation: ${e}`, 'error');
+      addLine(`Error initializing terminal session: ${e}`, 'error');
     } finally {
       // Log that the level has officially started for this user
       terminalService.logLevelStart();
@@ -429,7 +437,6 @@ const App: React.FC = () => {
     try {
       const output = await terminalService.sendCommand(command);
       
-      // Simple client-side CWD simulation for visual feedback
       if (command.startsWith('cd')) {
          const parts = command.split(' ');
          const target = parts.length > 1 ? parts[1] : '~';
@@ -517,7 +524,7 @@ const App: React.FC = () => {
           onSelectLevel={(id) => {
             if (id !== gameState.currentLevelId && user) {
               const prevSessionId = `sess_${user.username}_task_${gameState.currentLevelId}_s${sessionNonce}`;
-              fetch('/api/tasks/reset', {
+              authService.fetchAuthenticated('/api/tasks/reset', {
                 method: 'POST',
                 headers: authService.getAuthHeaders(),
                 body: JSON.stringify({
@@ -752,7 +759,7 @@ const App: React.FC = () => {
                    onSubmitFlag={(flag) => processFlagSubmission(flag)}
                    onResetSession={() => {
                      const prevSessionId = `sess_${user.username}_task_${gameState.currentLevelId}_s${sessionNonce}`;
-                     fetch('/api/tasks/reset', {
+                     authService.fetchAuthenticated('/api/tasks/reset', {
                        method: 'POST',
                        headers: authService.getAuthHeaders(),
                        body: JSON.stringify({
@@ -893,7 +900,7 @@ const App: React.FC = () => {
         config={aiConfig}
         onSave={(cfg) => { 
             setAiConfig(cfg); 
-            fetch('/api/config', {
+            authService.fetchAuthenticated('/api/config', {
                method: 'POST', 
                headers: authService.getAuthHeaders(), 
                body: JSON.stringify(cfg)
@@ -908,7 +915,7 @@ const App: React.FC = () => {
         <FacultyReviewModal 
           isOpen={isFacultyReviewOpen}
           onClose={() => setIsFacultyReviewOpen(false)}
-          reviewerId={user?.username || 'faculty_reviewer'}
+          reviewerId={user?.username || 'investigator'}
           currentTaskId={gameState.currentLevelId}
           currentTask={currentLevel}
         />
@@ -922,6 +929,7 @@ const App: React.FC = () => {
         <ResearchDashboard 
           isOpen={isResearchDashboardOpen}
           onClose={() => setIsResearchDashboardOpen(false)}
+          isAdmin={user?.role === 'admin'}
           onOpenGoogleDocExport={() => setIsGoogleDocExportOpen(true)}
         />
 

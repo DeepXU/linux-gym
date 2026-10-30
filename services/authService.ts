@@ -14,18 +14,12 @@ class AuthService {
   private authToken: string | null = null;
   private registeredUsers: Map<string, UserRecord> = new Map();
 
-  private readonly ADMIN_USER = 'admin';
-  private adminPass = 'admin';
-
   constructor() {
-    this.registerStudent('demo_cadet', 'password', false);
     if (typeof window !== 'undefined' && window.sessionStorage) {
       try {
         const savedToken = window.sessionStorage.getItem(TOKEN_STORAGE_KEY);
-        const savedUser = window.sessionStorage.getItem(USER_STORAGE_KEY);
-        if (savedToken && savedUser) {
+        if (savedToken) {
           this.authToken = savedToken;
-          this.currentUser = JSON.parse(savedUser);
         }
       } catch {
         // ignore storage errors
@@ -41,6 +35,12 @@ class AuthService {
     return this.authToken
       ? { 'Content-Type': 'application/json', Authorization: `Bearer ${this.authToken}` }
       : { 'Content-Type': 'application/json' };
+  }
+
+  public fetchAuthenticated(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+    const headers = new Headers(this.getAuthHeaders());
+    new Headers(init.headers).forEach((value, key) => headers.set(key, value));
+    return fetch(input, { ...init, headers });
   }
 
   private persistSession(user: User | null, token: string | null) {
@@ -68,73 +68,63 @@ class AuthService {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: username.trim(), password })
       });
+
       if (res.ok) {
         const data = await res.json();
         if (data?.user && data?.token) {
           this.persistSession(data.user, data.token);
+          void this.loadUsersFromServer().catch((error: Error) => console.warn(error.message));
           return data.user;
         }
-      } else if (res.status === 401 || res.status === 429) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || 'Invalid investigator credentials');
       }
+
+      const errData = await res.json().catch(() => ({}));
+      const message = errData.error || 'Invalid investigator credentials';
+      throw new Error(message);
     } catch (err: any) {
-      if (err?.message && (err.message.includes('Invalid') || err.message.includes('Too many'))) {
-        throw err;
+      if (err?.message) {
+        throw new Error(err.message);
       }
+      throw new Error('Authentication failed');
     }
-    return this.loginAsAdmin(username, password);
-  }
-
-  public loginAsAdmin(username: string, password: string): User | null {
-    if (username === this.ADMIN_USER && password === this.adminPass) {
-      const adminUser: User = {
-        id: 'admin-001',
-        username: 'Administrator',
-        role: 'admin'
-      };
-      this.persistSession(adminUser, this.authToken);
-      return adminUser;
-    }
-    return null;
-  }
-
-  public changeAdminPassword(newPass: string): boolean {
-    if (!newPass || newPass.length < 4) {
-      throw new Error("Password must be at least 4 characters");
-    }
-    this.adminPass = newPass;
-    return true;
   }
 
   public async initFromServer() {
     try {
-      if (this.authToken) {
-        const sessRes = await fetch('/api/auth/session', {
-          headers: this.getAuthHeaders()
-        });
-        if (sessRes.ok) {
-          const sessData = await sessRes.json();
-          if (sessData?.authenticated && sessData?.user) {
-            this.persistSession(sessData.user, this.authToken);
-          }
-        } else if (sessRes.status === 401) {
-          this.persistSession(null, null);
-        }
+      if (!this.authToken) {
+        this.currentUser = null;
+        return;
       }
-
-      const res = await fetch('/api/users', { headers: this.getAuthHeaders() });
-      if (res.ok) {
-        const usersData = await res.json();
-        const entries = Array.isArray(usersData) ? usersData : Object.values(usersData || {});
-        for (const entry of entries as any[]) {
-          if (entry?.user?.username) {
-            this.registeredUsers.set(entry.user.username, entry);
-          }
-        }
+      const sessRes = await fetch('/api/auth/session', {
+        headers: this.getAuthHeaders()
+      });
+      if (!sessRes.ok) {
+        this.persistSession(null, null);
+        return;
       }
+      const sessData = await sessRes.json();
+      if (!sessData?.authenticated || !sessData?.user) {
+        this.persistSession(null, null);
+        return;
+      }
+      this.persistSession(sessData.user, this.authToken);
+      await this.loadUsersFromServer();
     } catch {
+      this.persistSession(null, null);
       console.warn("Failed to sync users with server");
+    }
+  }
+
+  private async loadUsersFromServer() {
+    const res = await fetch('/api/users', { headers: this.getAuthHeaders() });
+    if (res.status === 403) return;
+    if (!res.ok) throw new Error(`Failed to load users (HTTP ${res.status})`);
+    const usersData = await res.json();
+    const entries = Array.isArray(usersData) ? usersData : Object.values(usersData || {});
+    for (const entry of entries as any[]) {
+      if (entry?.user?.username) {
+        this.registeredUsers.set(entry.user.username, entry);
+      }
     }
   }
 
@@ -142,79 +132,48 @@ class AuthService {
     const record = this.registeredUsers.get(username);
     if (!record || !this.authToken) return;
     try {
-      await fetch('/api/users', {
+      const res = await fetch('/api/users', {
         method: 'POST',
         headers: this.getAuthHeaders(),
-        body: JSON.stringify(record)
+        body: JSON.stringify({
+          username,
+          user: record.user,
+          ...(record.passwordHash ? { password: record.passwordHash } : {})
+        })
       });
-    } catch {
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `User update failed (HTTP ${res.status})`);
+      }
+    } catch (error) {
       console.error("Failed to sync user to server");
+      throw error;
     }
-  }
-
-  public registerStudent(username: string, password?: string, setCurrent: boolean = true): User {
-    if (this.registeredUsers.has(username)) {
-      throw new Error("Username already taken. Please login or choose another.");
-    }
-
-    if (!password || password.length < 4) {
-      throw new Error("Password must be at least 4 characters.");
-    }
-
-    const id = 'student-' + Math.random().toString(36).substring(2, 9);
-    const newUser: User = {
-      id,
-      username,
-      role: 'student',
-      condition: 'guided'
-    };
-
-    this.registeredUsers.set(username, {
-      user: newUser,
-      passwordHash: password
-    });
-
-    if (setCurrent) {
-      this.currentUser = newUser;
-      this.syncUser(username);
-    }
-    return newUser;
-  }
-
-  public loginStudent(username: string, password?: string): User {
-    const record = this.registeredUsers.get(username);
-    if (!record) {
-      throw new Error("User not found. Please register first.");
-    }
-
-    if (record.passwordHash !== password) {
-      throw new Error("Invalid password.");
-    }
-
-    this.currentUser = record.user;
-    return record.user;
   }
 
   public getAllStudents(): User[] {
     return Array.from(this.registeredUsers.values()).map(r => r.user);
   }
 
-  public resetStudentPassword(username: string, newPass: string) {
+  public async resetStudentPassword(username: string, newPass: string): Promise<void> {
+    if (!this.authToken) throw new Error('An authenticated administrator session is required.');
     const record = this.registeredUsers.get(username);
     if (!record) throw new Error("User not found");
+    if (newPass.length < 12) throw new Error("Password must be at least 12 characters.");
 
     record.passwordHash = newPass;
     this.registeredUsers.set(username, record);
-    this.syncUser(username);
+    await this.syncUser(username);
   }
 
   public updateStudentCondition(username: string, condition: 'guided' | 'unguided' | 'none') {
+    if (!this.authToken) throw new Error('An authenticated administrator session is required.');
     const record = this.registeredUsers.get(username);
     if (!record) throw new Error("User not found");
 
     record.user.condition = condition;
     this.registeredUsers.set(username, record);
-    this.syncUser(username);
+    void this.syncUser(username).catch((error: Error) => console.error(error.message));
   }
 
   public updateGameState(username: string, state: GameState) {

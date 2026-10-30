@@ -18,6 +18,7 @@
     "study:reset": "tsx scripts/study_cli.ts reset",
     "study:verify": "tsx scripts/study_cli.ts verify",
     "verify:collection-ready": "tsx scripts/study_cli.ts collection-ready",
+    "verify:preflight-evidence": "tsx scripts/verify_preflight_evidence.ts",
     "lint": "tsc --noEmit",
     "check": "bash check_deployment.sh",
     "verify": "bash check_deployment.sh"

@@ -6,6 +6,28 @@
 export const PROTOCOL_VERSION = 'V5.0.0';
 export const PROTOCOL_DOCUMENT = 'CSCI807_Week4_Guided_AI_Research_Proposal_V5.pdf';
 export const STUDY_SCOPE = 'guided_ai_only' as const;
+export const DEFAULT_AI_PROVIDER = 'ollama';
+export const DEFAULT_OLLAMA_URL = 'http://127.0.0.1:2004';
+export const DEFAULT_TUTOR_MODEL = 'qwen2.5-coder:7b';
+export const DEFAULT_GUARD_MODEL = 'llama-guard3:1b';
+
+export function validateOllamaModelRole(model: string, role: 'tutor' | 'guard'): {
+  model: string;
+  classifierType: 'generative_model' | 'dedicated_classifier' | 'prompted_classifier';
+} {
+  const normalizedModel = model.trim().toLowerCase();
+  if (!normalizedModel || normalizedModel.includes('embed')) {
+    throw new Error('Embedding models cannot be used as tutor or guard models.');
+  }
+  return {
+    model: model.trim(),
+    classifierType: role === 'guard'
+      ? normalizedModel.includes('guard')
+        ? 'dedicated_classifier'
+        : 'prompted_classifier'
+      : 'generative_model'
+  };
+}
 
 export const V5_TASK_IDS = [1, 2, 3, 4, 5, 6, 7, 8] as const;
 

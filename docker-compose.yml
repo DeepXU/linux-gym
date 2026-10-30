@@ -6,12 +6,11 @@ services:
     container_name: ctf-ollama
     restart: unless-stopped
     ports:
-      - "2004:2004"
+      - "127.0.0.1:2004:2004"
     volumes:
       - ollama_models:/root/.ollama
     environment:
       - OLLAMA_HOST=0.0.0.0:2004
-      - OLLAMA_ORIGINS=*
       - OLLAMA_NUM_PARALLEL=16
       - OLLAMA_FLASH_ATTENTION=1
       - OLLAMA_KEEP_ALIVE=24h
@@ -37,12 +36,15 @@ services:
       - PORT=2000
       - NODE_ENV=production
       - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
-      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:2004}
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.3:70b}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL_DOCKER:-http://ollama:2004}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5-coder:7b}
+      - LLAMA_GUARD_MODEL=${LLAMA_GUARD_MODEL:-llama-guard3:1b}
+      - ADMIN_INITIAL_PASSWORD=${ADMIN_INITIAL_PASSWORD:-}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-}
       - VLLM_BASE_URL=${VLLM_BASE_URL:-http://host.docker.internal:2005/v1}
       - VLLM_MODEL=${VLLM_MODEL:-meta-llama/Llama-3.3-70B-Instruct}
       - DOCKER_SOCKET_PATH=/var/run/docker.sock
-      - DOCKER_IMAGE=ubuntu:latest
+      - DOCKER_IMAGE=${DOCKER_IMAGE:-linux-tutor-sandbox:latest}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock # Allows sandbox container creation
       - ctf_data:/app/data

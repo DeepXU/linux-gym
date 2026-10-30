@@ -176,7 +176,7 @@ export interface AIConfig {
   seed?: number;
 
   deploymentMode?: 'local_llm' | 'hosted_model';
-  executionEnvironment?: 'ai_simulated' | 'native_pty' | 'rule_based';
+  executionEnvironment?: 'native_pty' | 'rule_based';
   environmentDescription?: string;
   flagSameModel?: boolean;
 
@@ -298,7 +298,7 @@ export interface ResearchConfiguration {
     seed?: number;
   };
   deploymentMode: 'local_llm' | 'hosted_model';
-  executionEnvironment: 'ai_simulated' | 'native_pty' | 'rule_based';
+  executionEnvironment: 'native_pty' | 'rule_based';
   environmentDescription?: string;
   idleThresholdMs: number;
 }

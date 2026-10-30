@@ -2,6 +2,8 @@
 
 Follow this step-by-step checklist before beginning **Formal Capability Data Collection** (`FORMAL_CAPABILITY`) or **Student Pilot** sessions.
 
+> **Current status: NOT READY FOR DATA COLLECTION.** This source build does not implement persistent ground-truth verification or the sequestered-case release/run APIs described below. Those UI actions now return explicit `501 Not Implemented` responses. Do not lock a formal run or collect participant data until those workflows are implemented and independently validated. A passing infrastructure check alone does not clear this blocker.
+
 ---
 
 ## Step 1 — Pre-Flight Infrastructure Check
@@ -10,9 +12,9 @@ Follow this step-by-step checklist before beginning **Formal Capability Data Col
    ```bash
    docker image inspect linux-tutor-sandbox:latest
    ```
-2. Verify Ollama is running on `http://127.0.0.1:11434`:
+2. Verify Ollama is running on `http://127.0.0.1:2004`:
    ```bash
-   curl -s http://127.0.0.1:11434/api/tags
+   curl -s http://127.0.0.1:2004/api/tags
    ```
 
 ---
@@ -27,19 +29,9 @@ npm run study:backup
 
 ---
 
-## Step 3 — Archive Development Records & Initialize a Clean Formal Collection Run
+## Step 3 — Do Not Reset or Start a Collection
 
-Clear all prior `DEVELOPMENT_TEST` / `dev_smoke` records while preserving users, the 8 canonical tasks, the 24 standardized test cases, the 6 sequestered cases, ground-truth records, and system configuration:
-
-```bash
-npm run study:reset -- --confirm "START NEW COLLECTION"
-```
-
-What this command produces:
-- A verified pre-reset backup in `backups/collection_backup_<timestamp>/` with `SHA256SUMS.txt` and `backup_manifest.json`
-- A fresh formal capability run folder in `data/runs/<runId>/` containing:
-  - `collection_manifest.json` (freezing Git commit SHA, model digests, sandbox image digest, and prompt digest)
-  - `SHA256SUMS.txt`
+The current build does not provide persistent ground-truth verification or the sequestered-case release/run workflow. Do not use `study:reset` to create a formal run until the readiness gate passes and those features are implemented. The reset command now checks readiness and should refuse while any required check fails.
 
 ---
 
@@ -48,21 +40,20 @@ What this command produces:
 Run the automated readiness gate:
 
 ```bash
+npm run verify:preflight-evidence
 npm run verify:collection-ready
 ```
 
-Inspect `COLLECTION_READINESS_REPORT.md` and `reports/collection_readiness.json`. Confirm that all checks (`CHK-01` through `CHK-07`) show **`PASS`** and the decision reads:
+Inspect the command output and any generated readiness report. This build deliberately fails `CHK-08` until ground-truth and sequestered-case workflows are implemented. A previous report file is not evidence for the current source.
 
-> **`READY TO BEGIN FORMAL CAPABILITY DATA COLLECTION`**
+The decision must remain **`NOT READY`** until every current check passes and the unresolved workflows are independently validated.
 
 ---
 
-## Step 5 — Start the Production Server & Lock the Run
+## Step 5 — Development Only
 
 ```bash
-npm start
+npm run dev
 ```
 
-1. Open `http://localhost:2000` and log in as `admin`.
-2. Check `/api/health` to confirm `deploymentProfile: "local_research"`, `dockerAvailable: true`, and `formalDataCollectionAllowed: true`.
-3. Lock the active formal evaluation run in the Research Dashboard before executing the 24 standardized cases + 5×3 high-risk consistency suite.
+Use this only for local development and repair verification. Do not recruit participants, lock a research run, or describe this build as research-ready.

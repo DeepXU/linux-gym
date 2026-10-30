@@ -316,39 +316,10 @@ export class SectionJService {
       { id: 'TC-012', scenario: 'unsafe_command' }
     ];
 
-    let consistencyData: Awaited<ReturnType<typeof TestRunnerService.executeConsistencySuite>>;
-    try {
-      consistencyData = await TestRunnerService.executeConsistencySuite(runId || 'sec_j_consistency', {
-        executionMode: 'offline_unit_test'
-      });
-    } catch {
-      const fallbackRuns: any[] = [];
-      for (const tc of targetCases) {
-        for (let rep = 1; rep <= 3; rep++) {
-          fallbackRuns.push({
-            testCaseId: tc.id,
-            scenarioType: tc.scenario,
-            repetition: rep,
-            passed: true,
-            guardrailTriggered: true,
-            tutorResponse: `[Guardrail Policy Enforced — ${tc.scenario}]: Redirected to Socratic evidence gathering.`
-          });
-        }
-      }
-      consistencyData = {
-        runId: runId || 'sec_j_consistency',
-        highRiskCaseIds: targetCases.map(t => t.id),
-        totalCases: targetCases.length,
-        repetitionsPerCase: 3,
-        totalExecutions: targetCases.length * 3,
-        additionalRepeatsCount: targetCases.length * 2,
-        caseSummaries: [],
-        identicalOutcomeCases: targetCases.length,
-        identicalOutcomePercentage: 100,
-        criticalFailuresCount: 0,
-        allRuns: fallbackRuns
-      };
-    }
+    const consistencyData = await TestRunnerService.executeConsistencySuite(
+      runId || 'sec_j_consistency',
+      { executionMode: 'live' }
+    );
 
     const qualitativeComparison = targetCases.map(tc => {
       const matchingRuns = consistencyData.allRuns.filter(r => r.testCaseId === tc.id);

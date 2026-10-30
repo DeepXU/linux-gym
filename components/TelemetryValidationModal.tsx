@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { X, CheckCircle, AlertCircle, FileCheck, ShieldAlert, ArrowRight } from 'lucide-react';
 import { TelemetryValidationReport } from '../types';
+import { authService } from '../services/authService';
 
 interface TelemetryValidationModalProps {
   isOpen: boolean;
@@ -24,7 +25,7 @@ export const TelemetryValidationModal: React.FC<TelemetryValidationModalProps> =
 
   const fetchValidations = async () => {
     try {
-      const res = await fetch(`/api/telemetry/validation?runId=${activeRunId}`);
+      const res = await authService.fetchAuthenticated(`/api/telemetry/validation?runId=${activeRunId}`);
       if (res.ok) {
         const data = await res.json();
         setValidations(data);

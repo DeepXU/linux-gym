@@ -21,6 +21,8 @@ import { GuardrailEngine } from './guardrails';
 import { TelemetryManager } from './telemetry';
 import { RuntimeDigestService } from './runtimeDigests';
 import { SandboxProvider } from './sandboxProvider';
+import { inspectPreflightVerificationEvidence } from './verificationEvidence';
+import { verifyOllamaModels } from './ollamaModelVerification';
 import type { UserRole } from '../types';
 
 /**
@@ -470,7 +472,7 @@ export function generateSha256SumsTxt(manifest: CanonicalFreezeManifest): string
 /**
  * Runs the 24-point server-side preflight check before allowing a lock transition.
  */
-export function runFreezePreflight(params: {
+export async function runFreezePreflight(params: {
   targetState: ResearchFreezeState;
   researchMode: ResearchLifecycleMode;
   config: any;
@@ -480,34 +482,42 @@ export function runFreezePreflight(params: {
   sequesteredCases: any[];
   defects: any[];
   dataDir: string;
-  allowSimulatedEnvironmentOverride?: boolean;
-}): FreezePreflightReport {
+}): Promise<FreezePreflightReport> {
   const cfg = params.config || {};
-  const digests = RuntimeDigestService.getRuntimeDigests();
   const sandboxHealth = SandboxProvider.checkHealth();
-  const distExists = fs.existsSync(path.join(process.cwd(), 'dist', 'index.html'));
+  const distExists =
+    fs.existsSync(path.join(process.cwd(), 'dist', 'index.html')) &&
+    fs.existsSync(path.join(process.cwd(), 'dist', 'server.cjs'));
+  const verificationEvidence = inspectPreflightVerificationEvidence();
 
   const tutorModel = String(cfg.ollamaModel || cfg.tutorModel || DEFAULT_TUTOR_MODEL);
   const safetyModel = String(cfg.llamaGuardModel || DEFAULT_GUARD_MODEL);
-  const isEmbeddingModel = tutorModel.toLowerCase().includes('embed');
+  const isEmbeddingModel =
+    tutorModel.toLowerCase().includes('embed') || safetyModel.toLowerCase().includes('embed');
+  const ollamaVerification = await verifyOllamaModels({
+    baseUrl: cfg.ollamaUrl,
+    tutorModel,
+    guardModel: safetyModel
+  });
+  const digests = RuntimeDigestService.getRuntimeDigests({
+    tutorModel,
+    guardModel: safetyModel,
+    ollamaUrl: cfg.ollamaUrl,
+    tutorDigest: ollamaVerification.tutorDigest,
+    guardDigest: ollamaVerification.guardDigest
+  });
 
-  const ollamaDigestResolved =
-    Boolean(digests.tutorModelDigest) &&
-    digests.tutorModelDigest.startsWith('sha256:') &&
-    !digests.tutorModelDigest.includes('unverified');
+  const ollamaDigestResolved = Boolean(ollamaVerification.tutorDigest);
 
-  const guardDigestResolved =
-    Boolean(digests.guardModelDigest) &&
-    digests.guardModelDigest.startsWith('sha256:') &&
-    !digests.guardModelDigest.includes('unverified');
+  const guardDigestResolved = Boolean(ollamaVerification.guardDigest);
 
   const sandboxDigestResolved =
     Boolean(digests.sandboxImageDigest) &&
     digests.sandboxImageDigest.startsWith('sha256:') &&
     !digests.sandboxImageDigest.includes('unverified');
 
-  const ollamaReachable = ollamaDigestResolved || Boolean(params.allowSimulatedEnvironmentOverride);
-  const dockerReady = sandboxHealth.dockerAvailable || Boolean(params.allowSimulatedEnvironmentOverride);
+  const ollamaReachable = ollamaVerification.reachable;
+  const dockerReady = sandboxHealth.dockerAvailable;
 
   const smokeResults = SandboxProvider.runAllEightTaskSmokeTestsTwice();
   const smokePassedCount = smokeResults.reduce(
@@ -554,18 +564,18 @@ export function runFreezePreflight(params: {
     {
       checkId: 'production_build_completed',
       label: 'Production frontend & server bundle built (dist/)',
-      passed: distExists || Boolean(params.allowSimulatedEnvironmentOverride),
+      passed: distExists && verificationEvidence.valid,
       mandatory: true,
-      observed: distExists ? 'dist/index.html present' : 'dist/index.html not found',
-      remediation: 'Run `npm run build` before locking.'
+      observed: distExists ? verificationEvidence.detail : 'Production frontend or server bundle is missing.',
+      remediation: 'Run `npm run verify:preflight-evidence` to build and test the current source tree.'
     },
     {
       checkId: 'automated_test_suite_passed',
       label: 'Automated protocol & security test suite verified',
-      passed: true,
+      passed: verificationEvidence.valid,
       mandatory: true,
-      observed: 'Protocol V5 contract & unit assertions active',
-      remediation: 'Run `npm test` to verify all test assertions pass.'
+      observed: verificationEvidence.detail,
+      remediation: 'Run `npm run verify:preflight-evidence` to build and test the current source tree.'
     },
     {
       checkId: 'provider_is_ollama',
@@ -586,7 +596,7 @@ export function runFreezePreflight(params: {
     {
       checkId: 'tutor_model_name_and_digest_resolved',
       label: 'Configured tutor model name & SHA-256 digest resolved',
-      passed: Boolean(tutorModel) && !isEmbeddingModel && (ollamaDigestResolved || Boolean(params.allowSimulatedEnvironmentOverride)),
+      passed: Boolean(tutorModel) && !isEmbeddingModel && ollamaDigestResolved,
       mandatory: true,
       observed: `${tutorModel} (${digests.tutorModelDigest})`,
       remediation: 'Verify the configured tutor model exists in `ollama list`.'
@@ -594,7 +604,7 @@ export function runFreezePreflight(params: {
     {
       checkId: 'safety_model_name_and_digest_resolved',
       label: 'Configured safety guard model name & SHA-256 digest resolved',
-      passed: Boolean(safetyModel) && (guardDigestResolved || Boolean(params.allowSimulatedEnvironmentOverride)),
+      passed: Boolean(safetyModel) && !isEmbeddingModel && guardDigestResolved,
       mandatory: true,
       observed: `${safetyModel} (${digests.guardModelDigest})`,
       remediation: 'Pull `llama-guard3:1b` (`ollama pull llama-guard3:1b`) or configure a verified guard model.'
@@ -618,7 +628,7 @@ export function runFreezePreflight(params: {
     {
       checkId: 'sandbox_image_and_digest_available',
       label: 'Sandbox container image & SHA-256 digest resolved',
-      passed: sandboxDigestResolved || Boolean(params.allowSimulatedEnvironmentOverride),
+      passed: sandboxDigestResolved,
       mandatory: true,
       observed: `${SandboxProvider.DEFAULT_DOCKER_IMAGE} (${digests.sandboxImageDigest})`,
       remediation: 'Build sandbox image: `docker build -t linux-tutor-sandbox:latest -f Dockerfile.sandbox .`'
@@ -626,7 +636,7 @@ export function runFreezePreflight(params: {
     {
       checkId: 'sandbox_smoke_test_all_eight_tasks',
       label: 'Sandbox smoke test passes all 8 tasks (x2 repetitions = 16 executions)',
-      passed: smokeAllPassed && (sandboxHealth.dockerAvailable || Boolean(params.allowSimulatedEnvironmentOverride)),
+      passed: smokeAllPassed && sandboxHealth.dockerAvailable,
       mandatory: true,
       observed: `${smokePassedCount}/16 passed (realDocker=${sandboxHealth.dockerAvailable})`,
       remediation: 'Ensure Docker is running and all 8 tasks pass `/api/sandbox/smoke-test`.'

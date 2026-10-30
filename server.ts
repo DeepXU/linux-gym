@@ -4,7 +4,6 @@ import cors from 'cors';
 import fs from 'fs';
 import path from 'path';
 import { WebSocketServer } from 'ws';
-import { spawn } from 'child_process';
 import http from 'http';
 import { GoogleGenAI } from '@google/genai';
 import Docker from 'dockerode';
@@ -17,11 +16,11 @@ import { CEWEvaluator } from './server/cewEvaluator';
 import { TelemetryManager } from './server/telemetry';
 import { TestRunnerService } from './server/testRunner';
 import { ExportService } from './server/exportService';
-import { CEWBenchmarkService } from './server/cewBenchmarks';
 import { SectionJService } from './server/sectionJService';
 import { generateAITutorResponse } from './server/aiProvider';
 import { TutorOrchestrator } from './server/tutorOrchestrator';
 import { SandboxProvider } from './server/sandboxProvider';
+import { RESEARCH_FREEZE_STATES, runFreezePreflight } from './server/researchGovernance';
 import {
   PROTOCOL_VERSION,
   V5_TASK_IDS,
@@ -35,14 +34,14 @@ import {
 } from './server/protocolV5';
 import {
   createAuthSession,
+  getAuthSessionFromToken,
   getAuthSessionFromRequest,
+  revokeAuthSession,
   sanitizeUsersMap,
   createRateLimiter
 } from './server/authMiddleware';
 import crypto from 'crypto';
 import {
-  FormalRun,
-  ResearchConfiguration,
   TelemetryEvent,
   Level,
   CEWSubmission,
@@ -60,7 +59,43 @@ export const APP_RELEASE_STAGE = 'Research Baseline Freeze 1';
 async function startServer() {
   const app = express();
   const server = http.createServer(app);
-  const wss = new WebSocketServer({ server, path: '/pty' });
+  server.on('error', error => {
+    console.error('HTTP server failed:', error);
+    process.exitCode = 1;
+  });
+  const wss = new WebSocketServer({ noServer: true });
+  const allowedOrigins = new Set(
+    (process.env.ALLOWED_ORIGINS || '')
+      .split(',')
+      .map(value => value.trim())
+      .filter(Boolean)
+      .map(value => new URL(value).origin)
+  );
+  const isAllowedOrigin = (origin: string | undefined, host: string | undefined): boolean => {
+    if (!origin) return true;
+    try {
+      const parsed = new URL(origin);
+      return parsed.host.toLowerCase() === host?.toLowerCase() || allowedOrigins.has(parsed.origin);
+    } catch {
+      return false;
+    }
+  };
+
+  server.on('upgrade', (req, socket, head) => {
+    let requestPath = '';
+    try {
+      requestPath = new URL(req.url || '/', 'http://localhost').pathname;
+    } catch {
+      socket.destroy();
+      return;
+    }
+    if (requestPath !== '/pty' || !isAllowedOrigin(req.headers.origin, req.headers.host)) {
+      socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+    wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
+  });
 
   // Initialize DB Tasks and Test Cases
   if (db.getTasks().length === 0) {
@@ -68,42 +103,49 @@ async function startServer() {
   }
   await TestRunnerService.initTestCases();
 
-  // Initialize 30 Researcher-Authored Benchmark CEW Submissions for Phase 4 / RQ5
-  if (db.getCEWSubmissions().length === 0) {
-    const benchmarkSubmissions = CEWBenchmarkService.toCEWSubmissions();
-    for (const sub of benchmarkSubmissions) {
-      await db.appendCEWSubmission(sub);
-      const task = db.getTaskById(sub.taskId) || ({ id: sub.taskId, title: `Task ${sub.taskId}` } as any);
-      const autoScore = CEWEvaluator.evaluateSubmission(sub, task, 'gemini-3-flash-preview', 'gemini', true);
-      await db.appendCEWScore({
-        ...autoScore,
-        testCaseId: sub.testCaseId
-      });
-    }
-    console.log(`[Research Lab] Initialized ${benchmarkSubmissions.length} benchmark CEW submissions for RQ5.`);
-  }
-
   // Initialize Docker with configurable socket path
   const dockerSocket = process.env.DOCKER_SOCKET_PATH || '/var/run/docker.sock';
   const docker = new Docker({ socketPath: dockerSocket });
 
   // Native PTY WebSocket Bridge with Telemetry Logging & Docker Orchestration
   wss.on('connection', async (ws, req) => {
+    const reqUrl = new URL(req.url || '/pty', 'http://localhost');
+    const authSession = getAuthSessionFromToken(reqUrl.searchParams.get('token'));
+    const authenticatedUser = authSession ? db.getUsers()[authSession.username] : undefined;
+    const requestedUsername = reqUrl.searchParams.get('username');
+    if (
+      !authSession ||
+      !authenticatedUser ||
+      authenticatedUser.user.role !== authSession.role ||
+      (requestedUsername && requestedUsername !== authSession.username)
+    ) {
+      ws.close(1008, 'Unauthorized');
+      return;
+    }
+
+    const requestedPtySessionId = reqUrl.searchParams.get('sessionId') || '';
+    if (
+      authSession.role === 'student' &&
+      requestedPtySessionId &&
+      (!requestedPtySessionId.startsWith(`sess_${authSession.username}_`) || requestedPtySessionId.length > 200)
+    ) {
+      ws.close(1008, 'Invalid student session');
+      return;
+    }
+
     let ptyInputBuffer = '';
     let isDocker = false;
-    let shell: any = null;
     let dockerStream: any = null;
     let dockerContainer: any = null;
 
-    const reqUrl = new URL(req.url || '/pty', 'http://localhost');
     const levelId = Math.min(8, Math.max(1, parseInt(reqUrl.searchParams.get('levelId') || '1', 10) || 1));
-    const ptySessionId = reqUrl.searchParams.get('sessionId') || `pty-session-${Date.now()}`;
+    const ptySessionId = requestedPtySessionId || `sess_${authSession.username}_task_${levelId}`;
 
     try {
       // Phase 2: Docker Container Orchestration (Root-provisioned, student runs as UID 1000 cadet)
       await docker.ping();
       
-      const dockerImage = process.env.DOCKER_IMAGE || 'ubuntu:24.04';
+      const dockerImage = SandboxProvider.DEFAULT_DOCKER_IMAGE;
       const memLimit = parseInt(process.env.SANDBOX_MEMORY || '1073741824', 10);
       const swapLimit = parseInt(process.env.SANDBOX_MEMORY_SWAP || '1073741824', 10);
       const cpus = parseFloat(process.env.SANDBOX_CPUS || '1.0');
@@ -129,7 +171,7 @@ async function startServer() {
           AutoRemove: true,
           Privileged: false,
           CapDrop: ['ALL'],
-          SecurityOpt: ['no-new-privileges:true'],
+          SecurityOpt: levelId === 7 ? [] : ['no-new-privileges:true'],
           Memory: memLimit,
           MemorySwap: swapLimit,
           CpuQuota: Math.floor(cpus * 100000),
@@ -153,7 +195,16 @@ async function startServer() {
         AttachStdout: true,
         AttachStderr: true
       });
-      await exec.start({});
+      const setupStream = await exec.start({});
+      await new Promise<void>((resolve, reject) => {
+        setupStream.on('data', () => {});
+        setupStream.once('end', resolve);
+        setupStream.once('error', reject);
+      });
+      const setupResult = await exec.inspect();
+      if (setupResult.ExitCode !== 0) {
+        throw new Error(`Task environment provisioning failed with exit code ${setupResult.ExitCode}.`);
+      }
       
       dockerStream = await dockerContainer.attach({
         stream: true,
@@ -175,24 +226,13 @@ async function startServer() {
       dockerStream.on('end', () => ws.close());
 
     } catch (e: any) {
-      const activeRun = db.getActiveRun();
-      const isFormalOrPilot = activeRun?.runType === 'formal' || activeRun?.runType === 'pilot' || process.env.NODE_ENV === 'production';
-      const allowFallback = !isFormalOrPilot && process.env.ALLOW_HOST_SHELL_FALLBACK === 'true';
-      if (!allowFallback) {
-        const correlationId = crypto.randomUUID();
-        console.error(`[Sandbox Failure] Docker container execution unavailable. Correlation ID: ${correlationId}, Error: ${e.message}`);
-        ws.send(`\r\n\x1b[31m[System Error] CONFIGURATION_ERROR: Sandbox execution environment is unavailable. In formal evaluation and student-pilot modes, host-process terminal fallback is disabled. (Correlation ID: ${correlationId})\x1b[0m\r\n`);
+      const correlationId = crypto.randomUUID();
+      console.error(`[Sandbox Failure] Docker container execution unavailable. Correlation ID: ${correlationId}, Error: ${e.message}`);
+      if (ws.readyState === ws.OPEN) {
+        ws.send(`\r\n\x1b[31m[System Error] CONFIGURATION_ERROR: Isolated Docker sandbox execution is unavailable. (Correlation ID: ${correlationId})\x1b[0m\r\n`);
         ws.close(1011, 'Sandbox unavailable');
-        return;
       }
-
-      ws.send(`\x1b[33m[Dev Warning] Docker unavailable. Using development host shell fallback (ALLOW_HOST_SHELL_FALLBACK=true)...\x1b[0m\r\n`);
-      shell = spawn('bash', ['-i'], {
-        env: { ...process.env, TERM: 'xterm-256color' }
-      });
-      shell.stdout.on('data', (data: any) => ws.send(data));
-      shell.stderr.on('data', (data: any) => ws.send(data));
-      shell.on('exit', () => ws.close());
+      return;
     }
 
     ws.on('message', async (msg) => {
@@ -203,23 +243,24 @@ async function startServer() {
         if (cmd) {
           SandboxProvider.recordTerminalEvidence(ptySessionId, cmd, undefined);
           const activeRun = db.getActiveRun();
+          const lockedRun = activeRun?.isLocked ? activeRun : undefined;
           await db.appendTelemetryEvent({
             eventId: `pty-cmd-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
             timestamp: new Date().toISOString(),
-            runId: activeRun?.runId || 'unlocked_session',
+            runId: lockedRun?.runId || 'unlocked_session',
             sessionId: ptySessionId,
             interactionId: `pty-int-${Date.now()}`,
-            userId: 'cadet',
-            actorType: 'student',
-            assignedCondition: 'guided',
-            effectiveCondition: 'guided',
+            userId: authSession.username,
+            actorType: authSession.role === 'student' ? 'student' : 'evaluator',
+            assignedCondition: authenticatedUser.user.condition || 'guided',
+            effectiveCondition: authenticatedUser.user.condition || 'guided',
             taskId: levelId,
             taskDefinitionVersion: '2.0.0',
             eventType: 'command_exec',
             input: cmd,
             sequenceNumber: 0,
             serverTimestamp: new Date().toISOString(),
-            dataClassification: activeRun?.runType || 'pilot',
+            dataClassification: lockedRun?.runType || 'dev_smoke',
             applicationVersion: APP_VERSION,
             telemetrySchemaVersion: TelemetryManager.SCHEMA_VERSION,
             details: { executionEnvironment: isDocker ? 'docker_pty' : 'native_pty' }
@@ -232,8 +273,6 @@ async function startServer() {
       
       if (isDocker && dockerStream) {
         dockerStream.write(msg);
-      } else if (shell) {
-        shell.stdin.write(msg);
       }
     });
 
@@ -245,8 +284,6 @@ async function startServer() {
         } catch (e) {
           console.error('Error stopping docker container (may have already exited):', (e as Error).message);
         }
-      } else if (shell) {
-        shell.kill();
       }
     });
   });
@@ -262,8 +299,8 @@ async function startServer() {
     throw new Error(`[Security Validation Error] Application port ${PORT} is outside the approved 2000-2009 range.`);
   }
 
-  if (process.env.NODE_ENV === 'production' && process.env.ALLOW_HOST_SHELL_FALLBACK === 'true') {
-    throw new Error(`[Security Validation Error] ALLOW_HOST_SHELL_FALLBACK=true is strictly forbidden in production. Exiting.`);
+  if (process.env.ALLOW_HOST_SHELL_FALLBACK === 'true') {
+    throw new Error('[Security Validation Error] Host-shell fallback has been removed. Unset ALLOW_HOST_SHELL_FALLBACK.');
   }
 
   const HOST = process.env.HOST || (process.env.NODE_ENV === 'production' && process.env.USE_NGINX === 'true' ? '127.0.0.1' : '0.0.0.0');
@@ -292,10 +329,105 @@ async function startServer() {
     };
   };
 
-  app.use(cors());
+  app.use((req, res, next) => {
+    if (!isAllowedOrigin(req.headers.origin, req.headers.host)) {
+      return res.status(403).json({ error: 'Request origin is not allowed.' });
+    }
+    next();
+  });
+  app.use(cors({
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, false);
+      try {
+        return callback(null, allowedOrigins.has(new URL(origin).origin));
+      } catch {
+        return callback(new Error('Invalid request origin.'));
+      }
+    }
+  }));
   app.use(express.json({ limit: '10mb' }));
+  app.use('/api', (req, res, next) => {
+    const publicPaths = new Set([
+      '/auth/login',
+      '/auth/session',
+      '/auth/logout',
+      '/health',
+      '/protocol/v5',
+      '/version'
+    ]);
+    if (publicPaths.has(req.path)) return next();
+
+    const session = getAuthSessionFromRequest(req);
+    const currentUser = session && db.getUsers()[session.username];
+    if (!session || !currentUser || currentUser.user.role !== session.role) {
+      return res.status(401).json({ error: 'Authentication required. Provide a valid session token.' });
+    }
+
+    const researcherOnly = [
+      /^\/users(?:\/|$)/,
+      /^\/sandbox(?:\/|$)/,
+      /^\/runs(?:\/|$)/,
+      /^\/governance(?:\/|$)/,
+      /^\/test-cases(?:\/|$)/,
+      /^\/(?:ground-truth|sequestered-cases)(?:\/|$)/,
+      /^\/reviews(?:\/|$)/,
+      /^\/cew(?:\/|$)/,
+      /^\/defects(?:\/|$)/,
+      /^\/telemetry(?:\/|$)/,
+      /^\/integrity(?:\/|$)/,
+      /^\/export(?:\/|$)/,
+      /^\/analysis(?:\/|$)/,
+      /^\/data(?:\/|$)/,
+      /^\/logs(?:\/|$)/,
+      /^\/config(?:\/|$)/,
+      /^\/workspace(?:\/|$)/
+    ];
+    if (session.role === 'student' && researcherOnly.some(pattern => pattern.test(req.path))) {
+      return res.status(403).json({ error: 'Researcher or administrator authorization required.' });
+    }
+    next();
+  });
 
   // --- API ROUTES ---
+
+  app.get('/api/governance/state', requireRole(['admin', 'evaluator']), (_req, res) => {
+    res.status(501).json({ error: 'Persistent research-governance state is not implemented in this build.' });
+  });
+  app.post('/api/governance/preflight', requireRole(['admin', 'evaluator']), async (req, res) => {
+    const targetState = RESEARCH_FREEZE_STATES.find(state => state === req.body?.targetState);
+    if (!targetState) {
+      return res.status(400).json({ error: 'A valid targetState is required.' });
+    }
+    try {
+      const report = await runFreezePreflight({
+        targetState,
+        researchMode: 'capability_evaluation',
+        config: db.getConfig(),
+        users: db.getUsers(),
+        testCases: db.getTestCases(),
+        groundTruth: [],
+        sequesteredCases: [],
+        defects: db.getDefects(),
+        dataDir: path.join(process.cwd(), 'data')
+      });
+      return res.json(report);
+    } catch (error) {
+      console.error('Governance preflight failed:', error);
+      return res.status(500).json({ error: 'Governance preflight failed.' });
+    }
+  });
+  app.post('/api/governance/transition', requireRole(['admin']), (_req, res) => {
+    res.status(501).json({ error: 'Research-governance state transitions are not implemented in this build.' });
+  });
+  app.post('/api/governance/unlock', requireRole(['admin']), (_req, res) => {
+    res.status(501).json({ error: 'Research-governance unlock and deviation recording are not implemented.' });
+  });
+  app.get('/api/integrity', requireRole(['admin', 'evaluator']), (_req, res) => {
+    res.status(501).json({ error: 'The execution-integrity query workflow is not implemented in this build.' });
+  });
+  app.get('/api/terminal/history', requireRole(['admin', 'evaluator', 'student']), (_req, res) => {
+    res.status(501).json({ error: 'Persistent terminal-history retrieval is not implemented in this build.' });
+  });
 
   // Auth Login Endpoint with Rate Limiting
   app.post('/api/auth/login', (req, res) => {
@@ -307,7 +439,11 @@ async function startServer() {
       return res.status(429).json({ error: `Too many failed attempts. Try again in ${remainingSec} seconds.` });
     }
 
-    const { username, password } = req.body;
+    const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    if (!username || !password) {
+      return res.status(400).json({ error: 'Username and password are required.' });
+    }
     const users = db.getUsers();
     const userRecord = users[username];
 
@@ -333,6 +469,24 @@ async function startServer() {
     });
   });
 
+  app.get('/api/auth/session', (req, res) => {
+    const session = getAuthSessionFromRequest(req);
+    if (!session) return res.status(401).json({ authenticated: false });
+    const userRecord = db.getUsers()[session.username];
+    if (!userRecord || userRecord.user.role !== session.role) {
+      revokeAuthSession(session.token);
+      return res.status(401).json({ authenticated: false });
+    }
+    return res.json({ authenticated: true, user: userRecord.user });
+  });
+
+  app.post('/api/auth/logout', (req, res) => {
+    const session = getAuthSessionFromRequest(req);
+    if (!session) return res.status(401).json({ error: 'Authentication required' });
+    revokeAuthSession(session.token);
+    return res.json({ success: true });
+  });
+
   // Health and System Metadata (Protocol V5.0.0)
   app.get('/api/health', (req, res) => {
     const sandboxHealth = SandboxProvider.checkHealth();
@@ -348,7 +502,7 @@ async function startServer() {
       host: HOST,
       portRange: '2000-2009',
       sandboxRequired: process.env.SANDBOX_REQUIRED !== 'false',
-      hostShellFallbackAllowed: process.env.ALLOW_HOST_SHELL_FALLBACK === 'true',
+      hostShellFallbackAllowed: false,
       uptime: process.uptime(),
       timestamp: new Date().toISOString()
     });
@@ -368,8 +522,8 @@ async function startServer() {
     });
   });
 
-  app.post('/api/sandbox/smoke-test', async (req, res) => {
-    const report = SandboxProvider.runAllEightTaskSmokeTestsTwice();
+  app.post('/api/sandbox/smoke-test', requireRole(['admin', 'evaluator']), async (req, res) => {
+    const report = SandboxProvider.runAllEightTaskSmokeTestsTwice(true);
     res.json(report);
   });
 
@@ -390,20 +544,44 @@ async function startServer() {
   });
 
   // 1. Users (Sanitized; never exposes passwordHash)
-  app.get('/api/users', async (req, res) => {
+  app.get('/api/users', requireRole(['admin', 'evaluator']), async (req, res) => {
     const usersObj = db.getUsers();
     res.json(sanitizeUsersMap(usersObj));
   });
 
-  app.post('/api/users', requireRole(['admin', 'evaluator']), async (req, res) => {
+  app.post('/api/users', requireRole(['admin']), async (req, res) => {
     const userPayload = req.body;
-    const username = userPayload.username || userPayload.user?.username;
-    if (username) {
-      const user = userPayload.user || userPayload;
-      const pass = userPayload.password || userPayload.passwordHash || 'password';
-      await db.saveUser(username, user, pass);
+    const username = typeof userPayload?.username === 'string' ? userPayload.username.trim() : '';
+    const requestedUser = userPayload?.user;
+    if (!/^[A-Za-z0-9._-]{3,64}$/.test(username)) {
+      return res.status(400).json({ error: 'Username must be 3-64 letters, digits, dots, underscores, or hyphens.' });
     }
-    res.json({ success: true });
+    if (requestedUser?.role && requestedUser.role !== 'student') {
+      return res.status(400).json({ error: 'This endpoint only manages student accounts.' });
+    }
+    const existing = db.getUsers()[username];
+    if (existing && existing.user.role !== 'student') {
+      return res.status(403).json({ error: 'Administrator and evaluator accounts cannot be changed here.' });
+    }
+    const user: User = {
+      id: existing?.user.id || `student-${crypto.randomUUID()}`,
+      username,
+      role: 'student',
+      condition: ['guided', 'unguided', 'none'].includes(requestedUser?.condition)
+        ? requestedUser.condition
+        : existing?.user.condition || 'guided'
+    };
+    if (userPayload.password !== undefined) {
+      if (typeof userPayload.password !== 'string' || userPayload.password.length < 12) {
+        return res.status(400).json({ error: 'Student passwords must be at least 12 characters.' });
+      }
+      await db.saveUser(username, user, userPayload.password);
+    } else if (existing) {
+      await db.updateUserProfile(username, user);
+    } else {
+      return res.status(400).json({ error: 'A new student account requires a password.' });
+    }
+    return res.json({ success: true, user });
   });
 
   // 2. Tasks / Levels (Sanitize flags and sensitive secrets unless authenticated admin/evaluator)
@@ -468,8 +646,6 @@ async function startServer() {
         evidence = '',
         warrant = '',
         confidenceRaw = 3,
-        userId = 'cadet',
-        testCaseId,
         runId,
         sessionId,
         timeToSolveMs = 0,
@@ -477,20 +653,41 @@ async function startServer() {
         idleTimeMs = 0
       } = req.body;
 
+      const authSession = getAuthSessionFromRequest(req);
+      if (!authSession || authSession.role !== 'student') {
+        return res.status(403).json({ error: 'An authenticated student session is required to submit a flag.' });
+      }
+      const userId = authSession.username;
+      if (typeof flag !== 'string' || flag.length > 256) {
+        return res.status(400).json({ error: 'Flag must be a string of at most 256 characters.' });
+      }
+      const normalizedConfidence = Number(confidenceRaw);
+      if (!Number.isInteger(normalizedConfidence) || normalizedConfidence < 1 || normalizedConfidence > 5) {
+        return res.status(400).json({ error: 'Confidence must be an integer from 1 to 5.' });
+      }
       const task = db.getTaskById(Number(taskId));
       if (!task) {
         return res.status(404).json({ error: 'Task not found' });
       }
 
       const activeRun = db.getActiveRun();
-      const currentRunId = runId || activeRun?.runId || 'unlocked_session';
-      const currentSessionId = sessionId || `session-${userId}-${taskId}`;
+      const lockedRun = activeRun?.isLocked ? activeRun : undefined;
+      if (lockedRun && runId && runId !== lockedRun.runId) {
+        return res.status(409).json({ error: 'Submitted run does not match the active locked run.' });
+      }
+      const currentRunId = lockedRun?.runId || 'unlocked_session';
+      const requestedSessionId = typeof sessionId === 'string' ? sessionId.trim() : '';
+      const currentSessionId =
+        requestedSessionId.startsWith(`sess_${userId}_`) && requestedSessionId.length <= 200
+          ? requestedSessionId
+          : `sess_${userId}_task_${task.id}`;
+      const assignedCondition = db.getUsers()[userId]?.user.condition || 'guided';
 
       // Server-side exact match validation
       const isCorrect = GuardrailEngine.isFlagMatch(flag, task.flag);
 
       // Normalized confidence (1-5 to 0.0-1.0)
-      const confidenceNormalized = Number(((Number(confidenceRaw) - 1) / 4).toFixed(2));
+      const confidenceNormalized = Number(((normalizedConfidence - 1) / 4).toFixed(2));
 
       // Create CEW Submission
       const submissionId = `sub-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
@@ -499,11 +696,11 @@ async function startServer() {
         runId: currentRunId,
         sessionId: currentSessionId,
         taskId: task.id,
-        testCaseId: testCaseId || undefined,
+        testCaseId: undefined,
         userId,
         attemptNumber: 1,
         flagAttempted: isCorrect ? 'REDACTED_CORRECT' : flag,
-        confidenceRaw: Number(confidenceRaw),
+        confidenceRaw: normalizedConfidence,
         confidenceNormalized,
         claim,
         evidence,
@@ -537,8 +734,8 @@ async function startServer() {
         interactionId: `int-flag-${Date.now()}`,
         userId,
         actorType: 'student',
-        assignedCondition: 'guided',
-        effectiveCondition: 'guided',
+        assignedCondition,
+        effectiveCondition: assignedCondition,
         taskId: task.id,
         taskDefinitionVersion: task.taskDefinitionVersion || '2.0.0',
         eventType: 'flag_submit',
@@ -546,10 +743,10 @@ async function startServer() {
         output: isCorrect ? 'SUCCESS' : 'INCORRECT',
         sequenceNumber: 0,
         serverTimestamp: new Date().toISOString(),
-        dataClassification: activeRun?.runType || 'pilot',
+        dataClassification: lockedRun?.runType || 'dev_smoke',
         applicationVersion: APP_VERSION,
         telemetrySchemaVersion: TelemetryManager.SCHEMA_VERSION,
-        details: { isCorrect, confidenceRaw, confidenceNormalized }
+        details: { isCorrect, confidenceRaw: normalizedConfidence, confidenceNormalized }
       });
 
       await db.appendTelemetryEvent({
@@ -560,15 +757,15 @@ async function startServer() {
         interactionId: `int-cew-${Date.now()}`,
         userId,
         actorType: 'student',
-        assignedCondition: 'guided',
-        effectiveCondition: 'guided',
+        assignedCondition,
+        effectiveCondition: assignedCondition,
         taskId: task.id,
         taskDefinitionVersion: task.taskDefinitionVersion || '2.0.0',
         eventType: 'cew_submit',
         input: JSON.stringify({ claim, evidence, warrant }),
         sequenceNumber: 0,
         serverTimestamp: new Date().toISOString(),
-        dataClassification: activeRun?.runType || 'pilot',
+        dataClassification: lockedRun?.runType || 'dev_smoke',
         applicationVersion: APP_VERSION,
         telemetrySchemaVersion: TelemetryManager.SCHEMA_VERSION,
         details: { submissionId }
@@ -582,15 +779,15 @@ async function startServer() {
         interactionId: `int-score-${Date.now()}`,
         userId,
         actorType: 'system',
-        assignedCondition: 'guided',
-        effectiveCondition: 'guided',
+        assignedCondition,
+        effectiveCondition: assignedCondition,
         taskId: task.id,
         taskDefinitionVersion: task.taskDefinitionVersion || '2.0.0',
         eventType: 'cew_auto_score',
         output: JSON.stringify(autoScore),
         sequenceNumber: 0,
         serverTimestamp: new Date().toISOString(),
-        dataClassification: activeRun?.runType || 'pilot',
+        dataClassification: lockedRun?.runType || 'dev_smoke',
         applicationVersion: APP_VERSION,
         telemetrySchemaVersion: TelemetryManager.SCHEMA_VERSION,
         details: { scoreId: autoScore.scoreId, autoScore }
@@ -624,27 +821,50 @@ async function startServer() {
     try {
       const {
         taskId,
-        assignedCondition = 'guided',
         messages = [],
         userQuery = '',
-        runId,
         sessionId,
-        userId = 'cadet',
         testCaseId
       } = req.body;
 
-      const currentSessionId = sessionId || `session-${userId}-${taskId}`;
+      const authSession = getAuthSessionFromRequest(req);
+      if (!authSession) {
+        return res.status(401).json({ error: 'Authentication required.' });
+      }
+      const numericTaskId = Number(taskId);
+      if (!Number.isInteger(numericTaskId) || !db.getTaskById(numericTaskId)) {
+        return res.status(400).json({ error: 'A valid taskId is required.' });
+      }
+      if (typeof userQuery !== 'string' || userQuery.length > 12000 || !Array.isArray(messages)) {
+        return res.status(400).json({ error: 'The query or conversation history is invalid.' });
+      }
+      const userId = authSession.username;
+      const requestedSessionId = typeof sessionId === 'string' ? sessionId.trim() : '';
+      if (
+        authSession.role === 'student' &&
+        requestedSessionId &&
+        (!requestedSessionId.startsWith(`sess_${userId}_`) || requestedSessionId.length > 200)
+      ) {
+        return res.status(403).json({ error: 'The tutor session does not belong to the authenticated student.' });
+      }
+      const currentSessionId =
+        requestedSessionId || `sess_${userId}_task_${numericTaskId}`;
+      const activeRun = db.getActiveRun();
+      const currentRunId = activeRun?.isLocked ? activeRun.runId : 'unlocked_session';
+      const assignedCondition = authSession.role === 'student'
+        ? db.getUsers()[userId]?.user.condition || 'guided'
+        : 'guided';
       const terminalEvidence = SandboxProvider.getBoundedTerminalEvidence(currentSessionId);
 
       const outcome = await TutorOrchestrator.executeTurn({
-        taskId: Number(taskId),
+        taskId: numericTaskId,
         userQuery,
         conversationHistory: messages,
         assignedCondition: assignedCondition as ExperimentalCondition,
-        runId,
+        runId: currentRunId,
         sessionId: currentSessionId,
         userId,
-        testCaseId,
+        testCaseId: authSession.role === 'student' ? undefined : testCaseId,
         terminalContext: terminalEvidence
       });
 
@@ -665,7 +885,7 @@ async function startServer() {
   });
 
   // Standalone API for External Pen-Testing Integration (Also routed through TutorOrchestrator)
-  app.post('/api/tutor/analyze', aiRateLimiter, async (req, res) => {
+  app.post('/api/tutor/analyze', requireRole(['admin', 'evaluator']), aiRateLimiter, async (req, res) => {
     try {
       const {
         query,
@@ -696,11 +916,17 @@ async function startServer() {
   });
 
   // 5. Progressive Hint Engine
-  app.post('/api/hints/request', async (req, res) => {
+  app.post('/api/hints/request', requireRole(['student']), async (req, res) => {
     try {
       const { taskId, currentLevelRequested = 0, commandCount = 0, hasAttemptedFlag = false } = req.body;
       const task = db.getTaskById(Number(taskId));
       if (!task) return res.status(404).json({ error: 'Task not found' });
+      const authSession = getAuthSessionFromRequest(req);
+      if (!authSession) return res.status(401).json({ error: 'Authentication required.' });
+      const requestedSessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId.trim() : '';
+      if (requestedSessionId && (!requestedSessionId.startsWith(`sess_${authSession.username}_`) || requestedSessionId.length > 200)) {
+        return res.status(403).json({ error: 'The hint session does not belong to the authenticated student.' });
+      }
 
       const { hintItem, state } = ProgressiveHintEngine.getNextHint(
         task,
@@ -710,23 +936,24 @@ async function startServer() {
       );
 
       const activeRun = db.getActiveRun();
+      const lockedRun = activeRun?.isLocked ? activeRun : undefined;
       await db.appendTelemetryEvent({
         eventId: `evt-hint-${Date.now()}`,
         timestamp: new Date().toISOString(),
-        runId: activeRun?.runId || 'unlocked_session',
-        sessionId: `hint-sess-${Date.now()}`,
+        runId: lockedRun?.runId || 'unlocked_session',
+        sessionId: requestedSessionId || `sess_${authSession.username}_task_${task.id}`,
         interactionId: `hint-int-${Date.now()}`,
-        userId: 'cadet',
+        userId: authSession.username,
         actorType: 'student',
-        assignedCondition: 'guided',
-        effectiveCondition: 'guided',
+        assignedCondition: db.getUsers()[authSession.username]?.user.condition || 'guided',
+        effectiveCondition: db.getUsers()[authSession.username]?.user.condition || 'guided',
         taskId: task.id,
         taskDefinitionVersion: task.taskDefinitionVersion || '2.0.0',
         eventType: 'hint_delivered',
         output: hintItem.text,
         sequenceNumber: 0,
         serverTimestamp: new Date().toISOString(),
-        dataClassification: activeRun?.runType || 'pilot',
+        dataClassification: lockedRun?.runType || 'dev_smoke',
         applicationVersion: APP_VERSION,
         telemetrySchemaVersion: TelemetryManager.SCHEMA_VERSION,
         details: { hintLevel: state.hintLevelDelivered, requested: state.hintLevelRequested, reason: state.reason }
@@ -747,110 +974,33 @@ async function startServer() {
     res.json(db.getActiveRun());
   });
 
-  app.post('/api/runs', async (req, res) => {
-    try {
-      const { runId, runName, runType = 'formal', activeTaskIds, notes, allowCloudDemoOverride = false } = req.body;
-      const sandboxHealth = SandboxProvider.checkHealth();
-
-      // Fail-Closed Rule: cloud_demo cannot lock formal, pilot, or regression runs unless explicitly overridden in synthetic test
-      if (
-        sandboxHealth.profile === 'cloud_demo' &&
-        (runType === 'formal' || runType === 'pilot' || runType === 'regression') &&
-        !allowCloudDemoOverride
-      ) {
-        return res.status(409).json({
-          error: 'CONFIGURATION_ERROR: Cannot lock formal, pilot, or regression runs in cloud_demo profile (Docker sandbox unavailable). Switch to local_research on a Docker-capable Linux host.',
-          deploymentProfile: sandboxHealth.profile,
-          formalDataCollectionAllowed: false
-        });
-      }
-
-      const config = db.getConfig();
-
-      const frozenConfig: ResearchConfiguration = {
-        applicationVersion: APP_VERSION,
-        promptTemplateVersion: PROTOCOL_VERSION,
-        guardrailPolicyVersion: GuardrailEngine.POLICY_VERSION,
-        cewRubricVersion: CEWEvaluator.RUBRIC_VERSION,
-        smeRubricVersion: '2.0.0',
-        taskDefinitionVersion: '2.0.0',
-        telemetrySchemaVersion: TelemetryManager.SCHEMA_VERSION,
-        tutorProvider: config?.tutorProvider || 'ollama',
-        tutorModel: config?.tutorModel || 'llama3',
-        evaluatorProvider: config?.evaluatorProvider || 'internal',
-        evaluatorModel: config?.evaluatorModel || 'rule-based-evaluator-v2',
-        sameModelAsTutor: !!config?.sameModelAsTutor,
-        processEvaluatorVersion: '2.0.0',
-        generationSettings: {
-          temperature: config?.temperature || 0.1,
-          topP: config?.topP || 0.95,
-          maxTokens: config?.maxTokens || 512,
-          seed: config?.seed || 42
-        },
-        deploymentMode: sandboxHealth.profile === 'local_research' ? 'local_llm' : 'hosted_model',
-        executionEnvironment: sandboxHealth.dockerAvailable ? 'native_pty' : 'ai_simulated',
-        environmentDescription: `profile:${sandboxHealth.profile}`,
-        idleThresholdMs: 60000
-      };
-
-      const formalRun: FormalRun = {
-        runId: runId || `run-${Date.now()}`,
-        runName: runName || 'Evaluation Run',
-        runType: runType || 'formal',
-        isLocked: true,
-        frozenConfig,
-        createdAt: new Date().toISOString(),
-        lockedAt: new Date().toISOString(),
-        notes,
-        activeTaskIds: activeTaskIds || [1, 2, 3, 4, 5, 6, 7, 8]
-      };
-
-      await db.saveFormalRun(formalRun);
-
-      await db.appendTelemetryEvent({
-        eventId: `evt-run-${Date.now()}`,
-        timestamp: new Date().toISOString(),
-        runId: formalRun.runId,
-        sessionId: `run-init-${formalRun.runId}`,
-        interactionId: `int-run-${Date.now()}`,
-        userId: 'admin',
-        actorType: 'admin',
-        assignedCondition: 'guided',
-        effectiveCondition: 'guided',
-        taskId: 1,
-        taskDefinitionVersion: '2.0.0',
-        eventType: 'run_locked',
-        sequenceNumber: 0,
-        serverTimestamp: new Date().toISOString(),
-        dataClassification: formalRun.runType,
-        applicationVersion: APP_VERSION,
-        telemetrySchemaVersion: TelemetryManager.SCHEMA_VERSION,
-        details: { frozenConfig }
-      });
-
-      res.json(formalRun);
-    } catch (e: any) {
-      res.status(500).json({ error: e.message });
-    }
+  app.post('/api/runs', requireRole(['admin']), (_req, res) => {
+    res.status(501).json({ error: 'Run creation and locking require the unimplemented persistent governance workflow.' });
   });
 
-  app.post('/api/runs/unlock', async (req, res) => {
-    const active = db.getActiveRun();
-    if (active) {
-      active.isLocked = false;
-      active.endedAt = new Date().toISOString();
-      await db.saveFormalRun(active);
-    }
-    res.json({ success: true });
+  app.post('/api/runs/unlock', requireRole(['admin']), (_req, res) => {
+    res.status(501).json({ error: 'Run unlocking and deviation recording are not implemented in this build.' });
   });
 
   // 7. Environment & Interaction Reset Validation
-  app.post('/api/tasks/reset', async (req, res) => {
+  app.post('/api/tasks/reset', requireRole(['student']), async (req, res) => {
     try {
-      const { taskId, sessionId, userId = 'cadet' } = req.body;
-      const task = db.getTaskById(Number(taskId));
+      const authSession = getAuthSessionFromRequest(req);
+      if (!authSession) {
+        return res.status(401).json({ error: 'Authentication required.' });
+      }
+      const taskId = Number(req.body?.taskId);
+      const task = db.getTaskById(taskId);
+      if (!task) {
+        return res.status(404).json({ error: 'Task not found.' });
+      }
+      const requestedSessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId.trim() : '';
+      if (requestedSessionId && (!requestedSessionId.startsWith(`sess_${authSession.username}_`) || requestedSessionId.length > 200)) {
+        return res.status(403).json({ error: 'The reset session does not belong to the authenticated student.' });
+      }
+      const targetSessionId = requestedSessionId || `sess_${authSession.username}_task_${task.id}`;
       const activeRun = db.getActiveRun();
-      const targetSessionId = sessionId || `sess-${userId}-${taskId}`;
+      const lockedRun = activeRun?.isLocked ? activeRun : undefined;
       SandboxProvider.clearTerminalEvidence(targetSessionId);
 
       // Verify signature restoration
@@ -860,19 +1010,19 @@ async function startServer() {
       await db.appendTelemetryEvent({
         eventId: `evt-reset-${Date.now()}`,
         timestamp: new Date().toISOString(),
-        runId: activeRun?.runId || 'unlocked_session',
+        runId: lockedRun?.runId || 'unlocked_session',
         sessionId: targetSessionId,
         interactionId: `int-rst-${Date.now()}`,
-        userId,
+        userId: authSession.username,
         actorType: 'student',
-        assignedCondition: 'guided',
-        effectiveCondition: 'guided',
+        assignedCondition: db.getUsers()[authSession.username]?.user.condition || 'guided',
+        effectiveCondition: db.getUsers()[authSession.username]?.user.condition || 'guided',
         taskId: Number(taskId),
         taskDefinitionVersion: task?.taskDefinitionVersion || '2.0.0',
         eventType: 'state_reset',
         sequenceNumber: 0,
         serverTimestamp: new Date().toISOString(),
-        dataClassification: activeRun?.runType || 'pilot',
+        dataClassification: lockedRun?.runType || 'dev_smoke',
         applicationVersion: APP_VERSION,
         telemetrySchemaVersion: TelemetryManager.SCHEMA_VERSION,
         details: { initialSig, restoredSig, verified: true }
@@ -889,18 +1039,42 @@ async function startServer() {
   });
 
   // 8. Standardized Test Cases Runner & Async Job Queue
-  app.get('/api/test-cases', (req, res) => {
+  app.get('/api/ground-truth', requireRole(['admin', 'evaluator']), (_req, res) => {
+    res.status(501).json({ error: 'Ground-truth records are not persisted or verified by this build.' });
+  });
+
+  app.post('/api/ground-truth/:caseId/verify', requireRole(['admin', 'evaluator']), (_req, res) => {
+    res.status(501).json({ error: 'Docker-backed ground-truth verification is not implemented in this build.' });
+  });
+
+  app.get('/api/sequestered-cases', requireRole(['admin', 'evaluator']), (_req, res) => {
+    res.status(501).json({ error: 'Sequestered-case storage and release state are not implemented in this build.' });
+  });
+
+  app.post('/api/sequestered-cases/regression-complete', requireRole(['admin', 'evaluator']), (_req, res) => {
+    res.status(501).json({ error: 'Regression completion cannot be attested through this build.' });
+  });
+
+  app.post('/api/sequestered-cases/release', requireRole(['admin', 'evaluator']), (_req, res) => {
+    res.status(501).json({ error: 'Sequestered-case release gating is not implemented in this build.' });
+  });
+
+  app.post('/api/sequestered-cases/run', requireRole(['admin', 'evaluator']), (_req, res) => {
+    res.status(501).json({ error: 'The sequestered acceptance runner is not implemented in this build.' });
+  });
+
+  app.get('/api/test-cases', requireRole(['admin', 'evaluator']), (req, res) => {
     res.json(db.getTestCases());
   });
 
-  app.post('/api/test-cases/jobs', async (req, res) => {
+  app.post('/api/test-cases/jobs', requireRole(['admin', 'evaluator']), async (req, res) => {
     try {
-      const { jobType = 'batch', runId, executionMode = 'live' } = req.body;
+      const { jobType = 'batch', runId } = req.body;
       const activeRun = db.getActiveRun();
       const job = TestRunnerService.startAsyncJob(
         jobType,
         runId || activeRun?.runId || 'async_job_run',
-        executionMode === 'offline_unit_test' ? 'offline_unit_test' : 'live'
+        'live'
       );
       res.json(job);
     } catch (e: any) {
@@ -908,22 +1082,22 @@ async function startServer() {
     }
   });
 
-  app.get('/api/test-cases/jobs/:jobId', (req, res) => {
+  app.get('/api/test-cases/jobs/:jobId', requireRole(['admin', 'evaluator']), (req, res) => {
     const job = TestRunnerService.getJobStatus(req.params.jobId);
     if (!job) return res.status(404).json({ error: 'Job not found' });
     res.json(job);
   });
 
-  app.post('/api/test-cases/run', async (req, res) => {
+  app.post('/api/test-cases/run', requireRole(['admin', 'evaluator']), async (req, res) => {
     try {
-      const { testCaseId, runId, repetitionNumber = 1, executionMode = 'live' } = req.body;
+      const { testCaseId, runId, repetitionNumber = 1 } = req.body;
       const activeRun = db.getActiveRun();
       const outcome = await TestRunnerService.executeTestCase(
         testCaseId,
         runId || activeRun?.runId || 'synthetic_run',
         {
           repetitionNumber: Number(repetitionNumber),
-          executionMode: executionMode === 'offline_unit_test' ? 'offline_unit_test' : 'live'
+          executionMode: 'live'
         }
       );
       res.json(outcome);
@@ -932,7 +1106,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/test-cases/batch', async (req, res) => {
+  app.post('/api/test-cases/batch', requireRole(['admin', 'evaluator']), async (req, res) => {
     try {
       const cases = db.getTestCases().filter(c => c.active);
       const activeRun = db.getActiveRun();
@@ -1221,9 +1395,16 @@ async function startServer() {
   });
 
   // 15. Data Retention Cleanup for Non-Formal Data
-  app.post('/api/data/cleanup-non-formal', async (req, res) => {
+  app.post('/api/data/cleanup-non-formal', requireRole(['admin']), async (req, res) => {
     try {
-      const { types = ['pilot', 'demonstration', 'synthetic'] } = req.body;
+      if (req.body?.confirmation !== 'DELETE_NON_FORMAL_RESEARCH_DATA') {
+        return res.status(400).json({ error: 'Explicit confirmation is required before deleting non-formal data.' });
+      }
+      const allowedTypes = ['pilot', 'demonstration', 'regression', 'synthetic'] as const;
+      const types = req.body.types ?? ['pilot', 'demonstration', 'synthetic'];
+      if (!Array.isArray(types) || types.length === 0 || types.some(type => !allowedTypes.includes(type))) {
+        return res.status(400).json({ error: 'Only non-formal data classifications can be deleted.' });
+      }
       const result = await db.deleteNonFormalData(types);
       res.json({ success: true, ...result });
     } catch (e: any) {
@@ -1236,8 +1417,11 @@ async function startServer() {
     res.json(db.getState().research_logs);
   });
 
-  app.post('/api/logs', async (req, res) => {
+  app.post('/api/logs', requireRole(['admin']), async (req, res) => {
     const log = req.body;
+    if (!log || typeof log !== 'object' || Array.isArray(log)) {
+      return res.status(400).json({ error: 'A log record object is required.' });
+    }
     db.getState().research_logs.push(log);
     await db.persist();
     res.json({ success: true });
@@ -1247,7 +1431,7 @@ async function startServer() {
     res.json(db.getConfig());
   });
 
-  app.post('/api/config', async (req, res) => {
+  app.post('/api/config', requireRole(['admin']), async (req, res) => {
     const active = db.getActiveRun();
     if (active && active.isLocked) {
       return res.status(403).json({ error: 'Cannot modify configuration while a formal evaluation run is locked.' });
@@ -1340,4 +1524,7 @@ async function startServer() {
   });
 }
 
-startServer().catch(console.error);
+startServer().catch(error => {
+  console.error('Application startup failed:', error);
+  process.exitCode = 1;
+});

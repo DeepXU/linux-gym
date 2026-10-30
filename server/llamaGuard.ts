@@ -95,7 +95,7 @@ export interface LlamaGuardEvaluationResult {
 export class LlamaGuardService {
   public static readonly VERSION = '3.0.0-cs-ed';
   public static readonly OFFICIAL_MODEL_TAG = 'llama-guard3:1b';
-  public static readonly DEFAULT_DIGEST = 'sha256:7b9148d2bc27c24430f878f';
+  public static readonly DEFAULT_DIGEST = 'unverified';
 
   /**
    * Builds the official Meta Llama Guard 3 prompt template, clearly distinguishing

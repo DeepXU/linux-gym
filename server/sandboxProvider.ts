@@ -1,9 +1,5 @@
 import { execFileSync } from 'child_process';
-import fs from 'fs';
-import os from 'os';
-import path from 'path';
 import { INITIAL_RESEARCH_TASKS as INITIAL_SERVER_TASKS } from './serverTasks';
-import { GuardrailEngine } from './guardrails';
 
 export type DeploymentProfile = 'local_research' | 'cloud_demo';
 
@@ -22,6 +18,9 @@ export interface SandboxHealthReport {
 export interface TaskSmokeTestResult {
   taskId: number;
   taskTitle: string;
+  verifiedWithRealDocker: boolean;
+  executionBackend: 'docker_container' | 'unavailable';
+  leakedContainers: string[];
   cleanRun1Passed: boolean;
   resetVerified: boolean;
   cleanRun2Passed: boolean;
@@ -45,15 +44,15 @@ const MAX_BUFFER_ENTRIES = 10;
 const MAX_OUTPUT_CHARS = 600;
 
 export class SandboxProvider {
+  public static readonly DEFAULT_DOCKER_IMAGE =
+    process.env.DOCKER_IMAGE || 'linux-tutor-sandbox:latest';
+
   private static cachedSmokeResults: TaskSmokeTestResult[] | null = null;
 
   /**
    * Detects whether Docker daemon is reachable on this host.
    */
   public static isDockerDaemonAvailable(): boolean {
-    if (process.env.FORCE_LOCAL_RESEARCH_PROFILE === 'true') {
-      return true;
-    }
     try {
       execFileSync('docker', ['info'], { stdio: 'ignore', timeout: 2500 });
       return true;
@@ -70,8 +69,7 @@ export class SandboxProvider {
    */
   public static getDeploymentProfile(): DeploymentProfile {
     const dockerOk = this.isDockerDaemonAvailable();
-    const externalOk = Boolean(process.env.EXTERNAL_SANDBOX_URL);
-    if (dockerOk || externalOk) {
+    if (dockerOk) {
       return 'local_research';
     }
     return 'cloud_demo';
@@ -120,7 +118,7 @@ export class SandboxProvider {
           'Oct 27 08:00:01 localhost systemd[1]: Started System Logging Service.\n' +
           'Oct 27 08:01:12 localhost sshd[412]: Server listening on 0.0.0.0 port 22.\n' +
           'Oct 27 08:02:44 localhost kernel: [   14.201928] eth0: link becomes ready\n' +
-          'Oct 27 08:04:19 localhost auth[519]: Audit token initialized: FLAG{grep_is_your_friend}\n' +
+          'Oct 27 08:04:19 localhost auth[519]: CRITICAL: FLAG{grep_is_powerful}\n' +
           'Oct 27 08:05:00 localhost cron[601]: (root) CMD (run-parts /etc/cron.hourly)\n' +
           'EOF',
           'chmod 755 /var/logs && chmod 644 /var/logs/system.log'
@@ -167,124 +165,144 @@ export class SandboxProvider {
     return baseSetup.join(' && ');
   }
 
+  private static shellQuote(value: string): string {
+    return `'${value.replace(/'/g, `'\\''`)}'`;
+  }
+
+  private static getSmokeVerificationCommand(taskId: number, flag: string): string {
+    const checks: Record<number, string> = {
+      1: `test -r /home/cadet/welcome.txt && grep -q ${this.shellQuote(flag)} /home/cadet/welcome.txt`,
+      2: `test -r /home/cadet/.secret_config && ls -la /home/cadet | grep -q .secret_config`,
+      3: `test "$SECRET_KEY" = ${this.shellQuote(flag)}`,
+      4: `grep -q ${this.shellQuote(`CRITICAL: ${flag}`)} /var/logs/system.log`,
+      5: `for attempt in $(seq 1 20); do curl -fsS http://127.0.0.1:8080/ | grep -q ${this.shellQuote(flag)} && exit 0; sleep 0.25; done; exit 1`,
+      6: `test "$(base64 -d /home/cadet/secret.b64)" = ${this.shellQuote(flag)}`,
+      7: 'sudo -n /bin/cat /root/flag.txt >/dev/null',
+      8: `found="$(find /var/lib/misc -name lost_flag.txt -print -quit)"; test "$found" = /var/lib/misc/subdir/lost_flag.txt && test -r "$found"`
+    };
+    return checks[taskId] || 'exit 1';
+  }
+
+  private static executeDockerSmokeCycle(taskId: number, flag: string): { passed: boolean; leakedContainers: string[]; error?: string } {
+    const containerName = `linux-gym-smoke-${taskId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const image = this.DEFAULT_DOCKER_IMAGE;
+    const setup = this.buildRootProvisioningScript(taskId);
+    const verification = this.getSmokeVerificationCommand(taskId, flag);
+    const learnerCheck = `test "$(id -u)" = 1000 && cd /home/cadet && ${verification}`;
+    const script = `set -eu; ${setup}; su -s /bin/bash -c ${this.shellQuote(learnerCheck)} cadet; printf 'SMOKE_PASS\\n'`;
+    const taskEnvironment = taskId === 3 ? ['-e', `SECRET_KEY=${flag}`] : [];
+    // Task 7 explicitly tests its task-scoped sudo rule; all other smoke tasks keep no-new-privileges.
+    const privilegeOptions = taskId === 7 ? [] : ['--security-opt', 'no-new-privileges:true'];
+    let passed = false;
+    let error: string | undefined;
+
+    try {
+      const output = execFileSync('docker', [
+        'run',
+        '--rm',
+        '--name', containerName,
+        '--network', 'none',
+        '--memory', '256m',
+        '--memory-swap', '256m',
+        '--cpus', '0.5',
+        '--pids-limit', '64',
+        '--cap-drop', 'ALL',
+        '--cap-add', 'SETUID',
+        '--cap-add', 'SETGID',
+        ...privilegeOptions,
+        '--tmpfs', '/tmp:rw,noexec,nosuid,size=64m',
+        '--tmpfs', '/run:rw,nosuid,size=16m',
+        '--tmpfs', '/home/cadet:rw,nosuid,size=128m',
+        '--workdir', '/home/cadet',
+        '--user', '0:0',
+        ...taskEnvironment,
+        image,
+        'bash',
+        '-lc',
+        script
+      ], { encoding: 'utf8', timeout: 45000, stdio: ['ignore', 'pipe', 'pipe'] });
+      passed = output.includes('SMOKE_PASS');
+      if (!passed) error = 'Docker smoke container exited without its success marker.';
+    } catch (caught) {
+      const failure = caught as NodeJS.ErrnoException & { status?: number };
+      error = failure.code === 'ETIMEDOUT'
+        ? 'Docker smoke container exceeded the 45-second timeout.'
+        : `Docker smoke container failed${failure.status === undefined ? '' : ` with exit code ${failure.status}`}.`;
+    }
+
+    let leakedContainers: string[] = [];
+    try {
+      const listed = execFileSync('docker', ['ps', '-aq', '--filter', `name=${containerName}`], {
+        encoding: 'utf8',
+        timeout: 5000,
+        stdio: ['ignore', 'pipe', 'pipe']
+      }).trim();
+      if (listed) {
+        try {
+          execFileSync('docker', ['rm', '-f', containerName], { stdio: 'ignore', timeout: 10000 });
+        } catch {
+          // The leak remains visible in the report below.
+        }
+        const remaining = execFileSync('docker', ['ps', '-aq', '--filter', `name=${containerName}`], {
+          encoding: 'utf8',
+          timeout: 5000,
+          stdio: ['ignore', 'pipe', 'pipe']
+        }).trim();
+        leakedContainers = remaining ? [containerName] : [];
+      }
+    } catch {
+      error = error || 'Unable to verify smoke-container cleanup with Docker.';
+      passed = false;
+    }
+
+    return { passed: passed && leakedContainers.length === 0, leakedContainers, error };
+  }
+
   /**
-   * Executes an isolated filesystem/process smoke test for a task (1..8) twice from a clean state:
-   * Run 1 -> Verify expected artifact & solution path -> Reset -> Run 2 -> Verify identical behavior.
-   * Never logs or exposes the raw flag in the returned summary.
+   * Executes each task twice in fresh, isolated Docker containers and reports no pass when Docker is unavailable.
    */
   public static runTaskSmokeTest(taskId: number): TaskSmokeTestResult {
     const task = INITIAL_SERVER_TASKS.find(t => t.id === taskId);
-    if (!task || !task.flag) {
+    if (!task || !task.flag || !this.isDockerDaemonAvailable()) {
       return {
         taskId,
-        taskTitle: `Task ${taskId}`,
+        taskTitle: task?.title || `Task ${taskId}`,
+        verifiedWithRealDocker: false,
+        executionBackend: 'unavailable',
+        leakedContainers: [],
         cleanRun1Passed: false,
         resetVerified: false,
         cleanRun2Passed: false,
         overallPassed: false,
-        evidenceSummary: 'Task definition missing from canonical 8-task catalog.'
+        evidenceSummary: !task || !task.flag
+          ? 'Task definition missing from canonical 8-task catalog.'
+          : 'Docker daemon is unavailable; no host fixture was used.'
       };
     }
 
-    const executeIsolatedCycle = (): boolean => {
-      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), `v5-smoke-t${taskId}-`));
-      try {
-        const homeCadet = path.join(tempRoot, 'home', 'cadet');
-        fs.mkdirSync(homeCadet, { recursive: true });
-
-        let observedOutput = '';
-
-        if (taskId === 1) {
-          const welcomeFile = path.join(homeCadet, 'welcome.txt');
-          fs.writeFileSync(welcomeFile, `${task.flag}\n`, 'utf8');
-          fs.writeFileSync(path.join(homeCadet, 'instructions.md'), 'Task 1 instructions\n', 'utf8');
-          observedOutput = execFileSync('cat', [welcomeFile], { encoding: 'utf8' }).trim();
-        } else if (taskId === 2) {
-          const dotFile = path.join(homeCadet, '.secret_config');
-          fs.writeFileSync(dotFile, `${task.flag}\n`, 'utf8');
-          fs.writeFileSync(path.join(homeCadet, 'public.txt'), 'Public content\n', 'utf8');
-          const lsOut = execFileSync('ls', ['-la', homeCadet], { encoding: 'utf8' });
-          if (lsOut.includes('.secret_config')) {
-            observedOutput = execFileSync('cat', [dotFile], { encoding: 'utf8' }).trim();
-          }
-        } else if (taskId === 3) {
-          const bashrc = path.join(homeCadet, '.bashrc');
-          fs.writeFileSync(bashrc, `export SECRET_KEY="${task.flag}"\n`, 'utf8');
-          observedOutput = execFileSync(
-            'bash',
-            ['-c', `source "${bashrc}" && printenv SECRET_KEY`],
-            { encoding: 'utf8' }
-          ).trim();
-        } else if (taskId === 4) {
-          const logDir = path.join(tempRoot, 'var', 'logs');
-          fs.mkdirSync(logDir, { recursive: true });
-          const logFile = path.join(logDir, 'system.log');
-          fs.writeFileSync(
-            logFile,
-            `Oct 27 08:00:01 systemd: Started\nOct 27 08:04:19 auth: ${task.flag}\nOct 27 08:05:00 cron: Done\n`,
-            'utf8'
-          );
-          const grepOut = execFileSync('grep', ['FLAG', logFile], { encoding: 'utf8' }).trim();
-          const match = grepOut.match(/FLAG\{[^}]+\}/);
-          observedOutput = match ? match[0] : '';
-        } else if (taskId === 5) {
-          const wwwFile = path.join(tempRoot, 'index.html');
-          fs.writeFileSync(wwwFile, `${task.flag}\n`, 'utf8');
-          // Verify local response payload parsing
-          observedOutput = fs.readFileSync(wwwFile, 'utf8').trim();
-        } else if (taskId === 6) {
-          const b64File = path.join(homeCadet, 'secret.b64');
-          const encoded = Buffer.from(task.flag, 'utf8').toString('base64');
-          fs.writeFileSync(b64File, `${encoded}\n`, 'utf8');
-          observedOutput = execFileSync('base64', ['-d', b64File], { encoding: 'utf8' }).trim();
-        } else if (taskId === 7) {
-          const rootDir = path.join(tempRoot, 'root');
-          fs.mkdirSync(rootDir, { recursive: true });
-          const rootFlag = path.join(rootDir, 'flag.txt');
-          fs.writeFileSync(rootFlag, `${task.flag}\n`, { encoding: 'utf8', mode: 0o600 });
-          const sudoersFile = path.join(tempRoot, 'cadet_task7.sudoers');
-          fs.writeFileSync(sudoersFile, 'cadet ALL=(root) NOPASSWD: /bin/cat /root/flag.txt\n', 'utf8');
-          if (fs.existsSync(sudoersFile)) {
-            observedOutput = execFileSync('cat', [rootFlag], { encoding: 'utf8' }).trim();
-          }
-        } else if (taskId === 8) {
-          const deepDir = path.join(tempRoot, 'var', 'lib', 'misc', 'subdir');
-          fs.mkdirSync(deepDir, { recursive: true });
-          const lostFlag = path.join(deepDir, 'lost_flag.txt');
-          fs.writeFileSync(lostFlag, `${task.flag}\n`, 'utf8');
-          const foundPath = execFileSync(
-            'find',
-            [path.join(tempRoot, 'var'), '-name', 'lost_flag.txt'],
-            { encoding: 'utf8' }
-          ).trim();
-          if (foundPath.endsWith('/var/lib/misc/subdir/lost_flag.txt')) {
-            observedOutput = execFileSync('cat', [foundPath], { encoding: 'utf8' }).trim();
-          }
-        }
-
-        return GuardrailEngine.isFlagMatch(observedOutput, task.flag);
-      } catch {
-        return false;
-      } finally {
-        fs.rmSync(tempRoot, { recursive: true, force: true });
-      }
-    };
-
-    const run1 = executeIsolatedCycle();
-    const resetVerified = true; // Ephemeral directory torn down and recreated cleanly
-    const run2 = executeIsolatedCycle();
-    const overallPassed = run1 && resetVerified && run2;
+    const run1 = this.executeDockerSmokeCycle(taskId, task.flag);
+    const run2 = this.executeDockerSmokeCycle(taskId, task.flag);
+    const resetVerified =
+      run1.passed &&
+      run2.passed &&
+      run1.leakedContainers.length === 0 &&
+      run2.leakedContainers.length === 0;
+    const overallPassed = run1.passed && resetVerified && run2.passed;
+    const leakedContainers = [...run1.leakedContainers, ...run2.leakedContainers];
 
     return {
       taskId,
       taskTitle: task.title,
-      cleanRun1Passed: run1,
+      verifiedWithRealDocker: true,
+      executionBackend: 'docker_container',
+      leakedContainers,
+      cleanRun1Passed: run1.passed,
       resetVerified,
-      cleanRun2Passed: run2,
+      cleanRun2Passed: run2.passed,
       overallPassed,
       evidenceSummary: overallPassed
-        ? `Task ${taskId} (${task.title}): Clean Run 1 PASS -> Reset Verified -> Clean Run 2 PASS (flag redacted)`
-        : `Task ${taskId} (${task.title}): Smoke test failed`
+        ? `Task ${taskId} (${task.title}): two fresh Docker containers passed as cadet; no leaks.`
+        : `Task ${taskId} (${task.title}): Docker run failed. ${run1.error || run2.error || (leakedContainers.length ? 'Container cleanup failed.' : 'Verification failed.')}`
     };
   }
 
@@ -299,7 +317,9 @@ export class SandboxProvider {
     for (let id = 1; id <= 8; id++) {
       results.push(this.runTaskSmokeTest(id));
     }
-    this.cachedSmokeResults = results;
+    this.cachedSmokeResults = results.every(result => result.verifiedWithRealDocker)
+      ? results
+      : null;
     return results;
   }
 
@@ -309,9 +329,11 @@ export class SandboxProvider {
   public static getHealthReport(): SandboxHealthReport {
     const profile = this.getDeploymentProfile();
     const dockerAvailable = this.isDockerDaemonAvailable();
-    const externalSandboxConfigured = Boolean(process.env.EXTERNAL_SANDBOX_URL);
-    const smokeResults = this.runAllEightTaskSmokeTestsTwice();
-    const allEightTasksSmokeTested = smokeResults.length === 8 && smokeResults.every(r => r.overallPassed);
+    const externalSandboxConfigured = false;
+    const smokeResults = this.cachedSmokeResults || [];
+    const allEightTasksSmokeTested =
+      smokeResults.length === 8 &&
+      smokeResults.every(r => r.verifiedWithRealDocker && r.executionBackend === 'docker_container' && r.overallPassed);
     const formalDataCollectionAllowed = profile === 'local_research' && allEightTasksSmokeTested;
 
     return {
@@ -321,10 +343,11 @@ export class SandboxProvider {
       durableStorageAvailable: true,
       allEightTasksSmokeTested,
       formalDataCollectionAllowed,
-      bannerMessage:
-        profile === 'cloud_demo'
-          ? 'NOT VALID FOR FORMAL DATA COLLECTION — Running in Cloud Demo profile (no Docker sandbox daemon attached). Formal, pilot, and regression run locking require the local_research deployment profile.'
-          : undefined,
+      bannerMessage: !formalDataCollectionAllowed
+        ? profile === 'cloud_demo'
+          ? 'NOT VALID FOR FORMAL DATA COLLECTION — Docker sandbox daemon is unavailable.'
+          : 'NOT VALID FOR FORMAL DATA COLLECTION — Eight-task real-Docker smoke verification has not passed in this server process.'
+        : undefined,
       taskSmokeResults: smokeResults,
       checkedAt: new Date().toISOString()
     };

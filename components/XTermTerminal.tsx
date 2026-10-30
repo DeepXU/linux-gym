@@ -3,6 +3,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { Bot, RotateCcw, Send, TerminalSquare, UserCheck } from 'lucide-react';
 import '@xterm/xterm/css/xterm.css';
+import { authService } from '../services/authService';
 
 interface XTermTerminalProps {
   levelId?: number;
@@ -161,7 +162,7 @@ export const XTermTerminal: React.FC<XTermTerminalProps> = ({
     }
 
     try {
-      const res = await fetch('/api/ai/chat', {
+      const res = await authService.fetchAuthenticated('/api/ai/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

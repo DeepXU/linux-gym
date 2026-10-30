@@ -14,6 +14,7 @@ import {
   Sparkles,
   Info
 } from 'lucide-react';
+import { authService } from '../services/authService';
 
 interface SectionJModalProps {
   isOpen: boolean;
@@ -37,7 +38,7 @@ export const SectionJModal: React.FC<SectionJModalProps> = ({ isOpen, onClose, r
     setIsLoading(true);
     try {
       const url = runId && runId !== 'all' ? `/api/analysis/section-j?runId=${runId}` : '/api/analysis/section-j';
-      const res = await fetch(url);
+      const res = await authService.fetchAuthenticated(url);
       if (res.ok) {
         const json = await res.json();
         setData(json);

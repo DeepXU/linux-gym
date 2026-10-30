@@ -8,6 +8,7 @@ import {
   signOut
 } from 'firebase/auth';
 import firebaseConfig from './firebaseConfig';
+import { authService } from './authService';
 
 // Initialize Firebase App safely
 const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
@@ -134,7 +135,7 @@ export const exportResearchMethodologyToGoogleDoc = async (
   }
 
   // Fallback to server endpoint
-  const fallbackRes = await fetch('/api/workspace/export-doc', {
+  const fallbackRes = await authService.fetchAuthenticated('/api/workspace/export-doc', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${token}`,
@@ -174,7 +175,7 @@ Evaluate how Socratic AI tutoring versus unguided exploration influences student
 The platform integrates seven core subsystems engineered for cybersecurity instruction and experimental research:
 
 A. Learner Workspace & Dual-Shell Execution
-- Terminal Modes: Supports browser-based simulated terminal interaction (zero-setup instruction) and native pseudo-terminal (pty) execution via xterm.js for authentic Bash commands.
+- Terminal Modes: Uses a native pseudo-terminal (pty) execution path via xterm.js for authentic Bash commands, with all AI assistance routed through the authenticated server-side tutor.
 - Domain Coverage: Tasks span 9 Linux domains (navigation, permissions, search, processes, users/groups, logs, network, scheduled execution, troubleshooting) aligned with Course Learning Objectives (CLOs).
 - Experimental Conditions: Guided (Socratic tutor active), Unguided (command execution without AI), and None (control).
 - Progressive Hint Scaffolding: 5-stage hint hierarchy (Levels 0-4: Conceptual Nudge -> Tool Recommendation -> Syntax Example -> Actionable Steps) requiring completed prerequisites.

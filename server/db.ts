@@ -18,6 +18,12 @@ import {
   User,
   AIConfig
 } from '../types';
+import {
+  DEFAULT_AI_PROVIDER,
+  DEFAULT_GUARD_MODEL,
+  DEFAULT_OLLAMA_URL,
+  DEFAULT_TUTOR_MODEL
+} from './protocolV5';
 
 export interface DatabaseState {
   version: string;
@@ -81,44 +87,39 @@ export class DatabaseManager {
     this.state = this.loadState();
   }
 
-  private getDefaultState(): DatabaseState {
-    const isProd = process.env.NODE_ENV === 'production';
-    const allowDemo = process.env.ALLOW_DEMO_ACCOUNTS === 'true';
-
+  private createInitialAdminRecord(): { user: User; passwordHash: string } {
     let adminPass = process.env.ADMIN_INITIAL_PASSWORD;
-    if (isProd && !adminPass) {
-      adminPass = crypto.randomBytes(12).toString('hex');
+    if (!adminPass) {
+      adminPass = crypto.randomBytes(18).toString('hex');
       console.log(`\n===================================================================`);
       console.log(`[FIRST-RUN SECURITY PROVISIONING] Generated initial admin password:`);
       console.log(`  Username: admin`);
       console.log(`  Password: ${adminPass}`);
       console.log(`Please log in and update your administrative password immediately.`);
       console.log(`===================================================================\n`);
-    } else if (!adminPass) {
-      adminPass = 'admin'; // Dev default only
-    }
-
-    const defaultUsers: Record<string, { user: User; passwordHash: string }> = {
-      admin: {
-        user: { id: 'admin-root', username: 'admin', role: 'admin' },
-        passwordHash: DatabaseManager.hashPassword(adminPass)
-      }
-    };
-
-    if (!isProd || allowDemo) {
-      defaultUsers['faculty_reviewer'] = {
-        user: { id: 'evaluator-fac1', username: 'faculty_reviewer', role: 'evaluator' },
-        passwordHash: DatabaseManager.hashPassword('faculty')
-      };
-      defaultUsers['demo_cadet'] = {
-        user: { id: 'student-demo1', username: 'demo_cadet', role: 'student', condition: 'guided' },
-        passwordHash: DatabaseManager.hashPassword('password')
-      };
     }
 
     return {
+      user: { id: 'admin-root', username: 'admin', role: 'admin' },
+      passwordHash: DatabaseManager.hashPassword(adminPass)
+    };
+  }
+
+  private getDefaultState(users: DatabaseState['users'] = {}): DatabaseState {
+    const configuredProvider = process.env.LLM_PROVIDER;
+    const provider: AIConfig['provider'] =
+      configuredProvider === 'gemini' ||
+      configuredProvider === 'ollama' ||
+      configuredProvider === 'openai' ||
+      configuredProvider === 'anthropic' ||
+      configuredProvider === 'custom'
+        ? configuredProvider
+        : DEFAULT_AI_PROVIDER;
+    const tutorModel = process.env.OLLAMA_MODEL || DEFAULT_TUTOR_MODEL;
+
+    return {
       version: '2.0.0',
-      users: defaultUsers,
+      users,
       levels: [],
       formal_runs: [],
       telemetry_events: [],
@@ -132,28 +133,29 @@ export class DatabaseManager {
       telemetry_validations: [],
       research_logs: [],
       config: {
-        provider: 'gemini',
-        ollamaUrl: process.env.OLLAMA_BASE_URL ? `${process.env.OLLAMA_BASE_URL}/api/chat` : 'http://localhost:2004/api/chat',
-        ollamaModel: 'llama3',
-        tutorProvider: 'gemini',
-        tutorModel: 'gemini-3-flash-preview',
-        evaluatorProvider: 'gemini',
-        evaluatorModel: 'gemini-3-flash-preview',
+        provider,
+        ollamaUrl: process.env.OLLAMA_BASE_URL || DEFAULT_OLLAMA_URL,
+        ollamaModel: tutorModel,
+        llamaGuardModel: process.env.LLAMA_GUARD_MODEL || DEFAULT_GUARD_MODEL,
+        tutorProvider: provider,
+        tutorModel,
+        evaluatorProvider: provider,
+        evaluatorModel: tutorModel,
         sameModelAsTutor: true,
         temperature: 0.1,
         topP: 0.95,
         maxTokens: 512,
         seed: 42,
-        deploymentMode: 'hosted_model',
-        executionEnvironment: 'ai_simulated'
+        deploymentMode: provider === 'ollama' ? 'local_llm' : 'hosted_model',
+        executionEnvironment: 'native_pty'
       },
       activeRunId: null
     };
   }
 
   private loadState(): DatabaseState {
-    const defaultState = this.getDefaultState();
     if (!fs.existsSync(this.jsonPath)) {
+      const defaultState = this.getDefaultState({ admin: this.createInitialAdminRecord() });
       this.persistSync(defaultState);
       return defaultState;
     }
@@ -161,10 +163,41 @@ export class DatabaseManager {
     try {
       const raw = fs.readFileSync(this.jsonPath, 'utf8');
       const parsed = JSON.parse(raw);
+      const defaultState = this.getDefaultState();
+      const users: DatabaseState['users'] = {};
+      if (parsed.users && typeof parsed.users === 'object' && !Array.isArray(parsed.users)) {
+        for (const [username, record] of Object.entries(parsed.users) as [string, any][]) {
+          const user = record?.user;
+          const passwordHash = record?.passwordHash;
+          const validPasswordHash =
+            typeof passwordHash === 'string' &&
+            (passwordHash.startsWith('scrypt$') || /^[a-f0-9]{64}$/i.test(passwordHash));
+          if (
+            !validPasswordHash ||
+            typeof user?.username !== 'string' ||
+            !['student', 'admin', 'evaluator'].includes(user.role) ||
+            (username === 'admin' && user.role !== 'admin')
+          ) {
+            continue;
+          }
+          users[username] = {
+            user: {
+              id: typeof user.id === 'string' ? user.id : `user-${username}`,
+              username,
+              role: user.role,
+              condition: ['guided', 'unguided', 'none'].includes(user.condition) ? user.condition : 'guided'
+            },
+            passwordHash
+          };
+        }
+      }
+      if (!users.admin) {
+        users.admin = this.createInitialAdminRecord();
+      }
       // Non-destructive merge with default schema
       const merged: DatabaseState = {
         version: parsed.version || '2.0.0',
-        users: parsed.users || defaultState.users,
+        users,
         levels: Array.isArray(parsed.levels) ? parsed.levels : [],
         formal_runs: Array.isArray(parsed.formal_runs) ? parsed.formal_runs : [],
         telemetry_events: Array.isArray(parsed.telemetry_events) ? parsed.telemetry_events : [],
@@ -233,16 +266,18 @@ export class DatabaseManager {
   }
 
   public async persist(): Promise<void> {
-    this.writeLock = this.writeLock.then(async () => {
+    const write = this.writeLock.catch(() => undefined).then(async () => {
+      const tmpPath = `${this.jsonPath}.${Date.now()}.${crypto.randomBytes(4).toString('hex')}.tmp`;
       try {
-        const tmpPath = `${this.jsonPath}.${Date.now()}.${crypto.randomBytes(4).toString('hex')}.tmp`;
         await fs.promises.writeFile(tmpPath, JSON.stringify(this.state, null, 2), 'utf8');
         await fs.promises.rename(tmpPath, this.jsonPath);
-      } catch (err) {
-        console.error('Failed to write database file atomically:', err);
+      } catch (error) {
+        console.error('Failed to write database file atomically:', error);
+        throw error;
       }
     });
-    return this.writeLock;
+    this.writeLock = write;
+    return write;
   }
 
   // --- GETTERS & SETTERS ---
@@ -348,10 +383,9 @@ export class DatabaseManager {
   }
 
   public async saveUser(username: string, user: User, passwordOrHash: string): Promise<void> {
-    const passwordHash =
-      passwordOrHash.startsWith('scrypt$') || passwordOrHash.length === 64
-        ? passwordOrHash
-        : DatabaseManager.hashPassword(passwordOrHash);
+    const passwordHash = passwordOrHash.startsWith('scrypt$')
+      ? passwordOrHash
+      : DatabaseManager.hashPassword(passwordOrHash);
     const cleanUser: User = {
       id: user.id || `user-${username}`,
       username: user.username || username,
@@ -359,6 +393,22 @@ export class DatabaseManager {
       condition: 'guided'
     };
     this.state.users[username] = { user: cleanUser, passwordHash };
+    await this.persist();
+  }
+
+  public async updateUserProfile(username: string, user: User): Promise<void> {
+    const current = this.state.users[username];
+    if (!current) throw new Error('User not found');
+    if (current.user.role !== 'student' || user.role !== 'student') {
+      throw new Error('Only student profiles can be updated through this operation');
+    }
+    this.state.users[username] = {
+      user: {
+        ...current.user,
+        condition: ['guided', 'unguided', 'none'].includes(user.condition || '') ? user.condition : current.user.condition
+      },
+      passwordHash: current.passwordHash
+    };
     await this.persist();
   }
 
@@ -581,6 +631,83 @@ export class DatabaseManager {
   public async setTestCases(cases: TestCase[]): Promise<void> {
     this.state.test_cases = cases;
     await this.persist();
+  }
+
+  public async archiveAndResetStudyData(
+    confirmation: string,
+    tasks: Level[],
+    testCases: TestCase[]
+  ): Promise<{ archiveDir: string; databaseSha256: string; telemetrySha256?: string }> {
+    if (!['ARCHIVE_AND_RESET_STUDY_DATA', 'CONFIRM_ARCHIVE_AND_RESET'].includes(confirmation)) {
+      throw new Error('Study reset requires an explicit confirmation token.');
+    }
+    if (this.getActiveRun()?.isLocked) {
+      throw new Error('Cannot reset study data while a formal run is locked.');
+    }
+    if (tasks.length !== 8 || testCases.length !== 24) {
+      throw new Error('Study reset requires exactly 8 canonical tasks and 24 test cases.');
+    }
+
+    await this.persist();
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-') +
+      `-${crypto.randomBytes(3).toString('hex')}`;
+    const archiveDir = path.join(process.cwd(), 'backups', `study_archive_${timestamp}`);
+    fs.mkdirSync(archiveDir, { recursive: true });
+
+    const archivedDatabasePath = path.join(archiveDir, 'research_lab.json');
+    await fs.promises.copyFile(this.jsonPath, archivedDatabasePath);
+    const databaseSha256 = crypto
+      .createHash('sha256')
+      .update(await fs.promises.readFile(archivedDatabasePath))
+      .digest('hex');
+
+    const telemetryExisted = fs.existsSync(this.jsonlPath);
+    const archivedTelemetryPath = path.join(archiveDir, 'telemetry_events_append_only.jsonl');
+    let telemetrySha256: string | undefined;
+    if (telemetryExisted) {
+      await fs.promises.copyFile(this.jsonlPath, archivedTelemetryPath);
+      telemetrySha256 = crypto
+        .createHash('sha256')
+        .update(await fs.promises.readFile(archivedTelemetryPath))
+        .digest('hex');
+    }
+    await fs.promises.writeFile(
+      path.join(archiveDir, 'archive_manifest.json'),
+      JSON.stringify({ archivedAt: new Date().toISOString(), databaseSha256, telemetrySha256 }, null, 2),
+      'utf8'
+    );
+
+    const previousState = this.state;
+    const resetState = this.getDefaultState(previousState.users);
+    resetState.version = previousState.version;
+    resetState.config = previousState.config ? { ...previousState.config } : null;
+    resetState.levels = [...tasks];
+    resetState.test_cases = [...testCases];
+    this.state = resetState;
+
+    try {
+      await fs.promises.writeFile(this.jsonlPath, '', 'utf8');
+      await this.persist();
+    } catch (resetError) {
+      this.state = previousState;
+      try {
+        await this.persist();
+        if (telemetryExisted) {
+          await fs.promises.copyFile(archivedTelemetryPath, this.jsonlPath);
+        } else if (fs.existsSync(this.jsonlPath)) {
+          await fs.promises.unlink(this.jsonlPath);
+        }
+      } catch (restoreError) {
+        throw new Error(
+          `Study reset failed and rollback was incomplete: ${(restoreError as Error).message}`
+        );
+      }
+      throw resetError;
+    }
+
+    this.sessionSequences.clear();
+    this.idempotencyKeys.clear();
+    return { archiveDir, databaseSha256, telemetrySha256 };
   }
 
   public async saveTestCase(tc: TestCase): Promise<void> {

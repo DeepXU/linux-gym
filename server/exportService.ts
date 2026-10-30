@@ -347,16 +347,20 @@ export class ExportService {
     const configToExport = activeRun?.frozenConfig || state.config || {};
     // Sanitize any potential secrets from config if needed
     const safeConfig = { ...configToExport };
-    const runtimeDigests = RuntimeDigestService.getRuntimeDigests();
+    const runtimeDigests = RuntimeDigestService.getRuntimeDigests({
+      tutorModel: (safeConfig as any).ollamaModel || (safeConfig as any).tutorModel,
+      guardModel: (safeConfig as any).llamaGuardModel,
+      ollamaUrl: (safeConfig as any).ollamaUrl
+    });
     
     const configSnapshot = {
       applicationVersion: '1.0.0',
       releaseStage: 'Research Baseline Freeze 1',
       applicationCommit: runtimeDigests.applicationCommit,
       sourceCommit: runtimeDigests.sourceCommit,
-      tutorModelName: (safeConfig as any).tutorModel || 'llama3.3:70b',
+      tutorModelName: (safeConfig as any).ollamaModel || (safeConfig as any).tutorModel || 'qwen2.5-coder:7b',
       tutorModelDigest: runtimeDigests.tutorModelDigest,
-      guardModelName: (safeConfig as any).guardModelName || 'llama-guard3:1b',
+      guardModelName: (safeConfig as any).llamaGuardModel || 'llama-guard3:1b',
       guardModelDigest: runtimeDigests.guardModelDigest,
       ollamaVersion: runtimeDigests.ollamaVersion,
       dockerImageDigest: runtimeDigests.dockerImageDigest,

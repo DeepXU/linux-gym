@@ -8,8 +8,8 @@ interface LoginProps {
 }
 
 export const Login: React.FC<LoginProps> = ({ onLogin }) => {
-  const [adminUsername, setAdminUsername] = useState('admin');
-  const [adminPassword, setAdminPassword] = useState('admin');
+  const [adminUsername, setAdminUsername] = useState('');
+  const [adminPassword, setAdminPassword] = useState('');
   const [error, setError] = useState('');
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -63,7 +63,7 @@ export const Login: React.FC<LoginProps> = ({ onLogin }) => {
                   value={adminUsername}
                   onChange={(e) => setAdminUsername(e.target.value)}
                   className="w-full bg-slate-950 border border-slate-700 rounded-lg py-3 pl-10 pr-4 text-white placeholder-slate-600 focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-colors"
-                  placeholder="admin"
+                  placeholder="Investigator username"
                 />
               </div>
             </div>
@@ -78,11 +78,11 @@ export const Login: React.FC<LoginProps> = ({ onLogin }) => {
                   value={adminPassword}
                   onChange={(e) => setAdminPassword(e.target.value)}
                   className="w-full bg-slate-950 border border-slate-700 rounded-lg py-3 pl-10 pr-4 text-white placeholder-slate-600 focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-colors"
-                  placeholder="••••••••"
+                  placeholder="Enter passphrase"
                 />
               </div>
               <p className="text-[10px] text-slate-500 mt-2 text-center">
-                Local Investigator Credentials: <code className="bg-slate-800 px-1 py-0.5 rounded text-slate-300">admin</code> / <code className="bg-slate-800 px-1 py-0.5 rounded text-slate-300">admin</code>
+                Use the investigator credentials configured by your server administrator.
               </p>
             </div>
           </div>

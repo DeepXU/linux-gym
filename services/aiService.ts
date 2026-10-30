@@ -1,4 +1,5 @@
 import { AIConfig, Level } from '../types';
+import { authService } from './authService';
 
 /**
  * Server-Authoritative AI & Hint Client Service (Protocol V5.0.0)
@@ -69,8 +70,20 @@ export class TerminalService {
     // Trust events are recorded server-side via /api/telemetry/events
   }
 
-  public downloadLogs(): void {
-    window.location.href = '/api/export/package';
+  public async downloadLogs(): Promise<void> {
+    const response = await authService.fetchAuthenticated('/api/export/research-package');
+    if (!response.ok) {
+      throw new Error(`Research export failed (HTTP ${response.status}).`);
+    }
+    const blob = await response.blob();
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `research_package_${Date.now()}.zip`;
+    document.body.appendChild(link);
+    link.click();
+    window.URL.revokeObjectURL(url);
+    document.body.removeChild(link);
   }
 
   /**

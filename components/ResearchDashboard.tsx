@@ -28,19 +28,22 @@ import {
 } from '../types';
 import { CEWReviewModal } from './CEWReviewModal';
 import { SectionJModal } from './SectionJModal';
+import { authService } from '../services/authService';
 
 interface ResearchDashboardProps {
   isOpen: boolean;
   onClose: () => void;
   onOpenExport?: () => void;
   onOpenGoogleDocExport?: () => void;
+  isAdmin?: boolean;
 }
 
 export const ResearchDashboard: React.FC<ResearchDashboardProps> = ({
   isOpen,
   onClose,
   onOpenExport,
-  onOpenGoogleDocExport
+  onOpenGoogleDocExport,
+  isAdmin = false
 }) => {
   const [reviews, setReviews] = useState<ExpertReview[]>([]);
   const [defects, setDefects] = useState<DefectRecord[]>([]);
@@ -78,7 +81,7 @@ export const ResearchDashboard: React.FC<ResearchDashboardProps> = ({
   const [govMessage, setGovMessage] = useState<string>('');
 
   const getAuthHeaders = (): Record<string, string> => {
-    const token = localStorage.getItem('ctf_auth_token');
+    const token = sessionStorage.getItem('socratic_shell_auth_token');
     return {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {})
@@ -94,60 +97,66 @@ export const ResearchDashboard: React.FC<ResearchDashboardProps> = ({
   const loadDashboardData = async () => {
     setIsLoading(true);
     try {
-      const govRes = await fetch('/api/governance/state');
+      const govRes = await authService.fetchAuthenticated('/api/governance/state');
       if (govRes.ok) {
         const govData = await govRes.json();
         setGovernance(govData);
         if (Array.isArray(govData.allowedTransitions) && govData.allowedTransitions.length > 0) {
           setTargetFreezeState(govData.allowedTransitions[0]);
         }
+      } else {
+        const data = await govRes.json().catch(() => ({}));
+        setGovMessage(data.error || `Research governance is unavailable (HTTP ${govRes.status}).`);
       }
 
       // Fetch runs
-      const runRes = await fetch('/api/runs');
+      const runRes = await authService.fetchAuthenticated('/api/runs');
       if (runRes.ok) {
         const runData = await runRes.json();
         setRuns(runData);
       }
 
-      const activeRes = await fetch('/api/runs/active');
+      const activeRes = await authService.fetchAuthenticated('/api/runs/active');
       if (activeRes.ok) {
         setActiveRun(await activeRes.json());
       }
 
       // Fetch reviews
       const revUrl = selectedRunFilter !== 'all' ? `/api/reviews?runId=${selectedRunFilter}` : '/api/reviews';
-      const revRes = await fetch(revUrl);
+      const revRes = await authService.fetchAuthenticated(revUrl);
       if (revRes.ok) {
         setReviews(await revRes.json());
       }
 
       // Fetch defects
-      const defRes = await fetch('/api/defects');
+      const defRes = await authService.fetchAuthenticated('/api/defects');
       if (defRes.ok) {
         setDefects(await defRes.json());
       }
 
       // Fetch RQ4 Integrity Reports
       const intUrl = selectedRunFilter !== 'all' ? `/api/integrity?runId=${selectedRunFilter}` : '/api/integrity';
-      const intRes = await fetch(intUrl);
+      const intRes = await authService.fetchAuthenticated(intUrl);
       if (intRes.ok) {
         setIntegrityReports(await intRes.json());
+      } else {
+        const data = await intRes.json().catch(() => ({}));
+        setGovMessage(data.error || `Integrity reports are unavailable (HTTP ${intRes.status}).`);
       }
 
       // Fetch agreement
-      const agrRes = await fetch('/api/cew/agreement');
+      const agrRes = await authService.fetchAuthenticated('/api/cew/agreement');
       if (agrRes.ok) {
         setAgreementReport(await agrRes.json());
       }
 
       // Fetch CEW Submissions & Scores
-      const subsRes = await fetch('/api/cew/submissions');
+      const subsRes = await authService.fetchAuthenticated('/api/cew/submissions');
       if (subsRes.ok) {
         setCewSubmissions(await subsRes.json());
       }
 
-      const scoresRes = await fetch('/api/cew/scores');
+      const scoresRes = await authService.fetchAuthenticated('/api/cew/scores');
       if (scoresRes.ok) {
         setCewScores(await scoresRes.json());
       }
@@ -161,7 +170,7 @@ export const ResearchDashboard: React.FC<ResearchDashboardProps> = ({
   const handleRunPreflight = async (stateToVerify?: string) => {
     const target = stateToVerify || targetFreezeState || 'PILOT_ACTIVE';
     try {
-      const res = await fetch('/api/governance/preflight', {
+      const res = await authService.fetchAuthenticated('/api/governance/preflight', {
         method: 'POST',
         headers: getAuthHeaders(),
         body: JSON.stringify({ targetState: target })
@@ -180,7 +189,7 @@ export const ResearchDashboard: React.FC<ResearchDashboardProps> = ({
 
   const handleTransitionState = async () => {
     try {
-      const res = await fetch('/api/governance/transition', {
+      const res = await authService.fetchAuthenticated('/api/governance/transition', {
         method: 'POST',
         headers: getAuthHeaders(),
         body: JSON.stringify({
@@ -204,7 +213,7 @@ export const ResearchDashboard: React.FC<ResearchDashboardProps> = ({
 
   const handleUnlockWithDeviation = async () => {
     try {
-      const res = await fetch('/api/governance/unlock', {
+      const res = await authService.fetchAuthenticated('/api/governance/unlock', {
         method: 'POST',
         headers: getAuthHeaders(),
         body: JSON.stringify({
@@ -232,7 +241,7 @@ export const ResearchDashboard: React.FC<ResearchDashboardProps> = ({
     e.preventDefault();
     if (!newDefect.title) return;
     try {
-      const res = await fetch('/api/defects', {
+      const res = await authService.fetchAuthenticated('/api/defects', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -262,7 +271,7 @@ export const ResearchDashboard: React.FC<ResearchDashboardProps> = ({
 
   const handleUpdateDefectStatus = async (defect: DefectRecord, status: DefectStatus) => {
     try {
-      await fetch('/api/defects', {
+      await authService.fetchAuthenticated('/api/defects', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...defect, status, updatedAt: new Date().toISOString() })
@@ -278,17 +287,23 @@ export const ResearchDashboard: React.FC<ResearchDashboardProps> = ({
       return;
     }
     try {
-      const res = await fetch('/api/data/cleanup-non-formal', {
+      const res = await authService.fetchAuthenticated('/api/data/cleanup-non-formal', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ types: ['pilot', 'demonstration', 'synthetic'] })
+        body: JSON.stringify({
+          types: ['pilot', 'demonstration', 'synthetic'],
+          confirmation: 'DELETE_NON_FORMAL_RESEARCH_DATA'
+        })
       });
       if (res.ok) {
         alert('Non-formal data purged successfully.');
         loadDashboardData();
+      } else {
+        const data = await res.json();
+        throw new Error(data.error || `Cleanup failed (HTTP ${res.status}).`);
       }
-    } catch (e) {
-      alert('Failed to cleanup data: ' + e);
+    } catch (error) {
+      alert(`Failed to cleanup data: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
 
@@ -297,9 +312,9 @@ export const ResearchDashboard: React.FC<ResearchDashboardProps> = ({
   // Compute Metrics
   const totalReviews = reviews.length;
   const passedReviews = reviews.filter(r => r.overallPass).length;
-  const passRate = totalReviews > 0 ? ((passedReviews / totalReviews) * 100).toFixed(1) : '100.0';
+  const passRate = totalReviews > 0 ? ((passedReviews / totalReviews) * 100).toFixed(1) : undefined;
 
-  const avgDimensionRatings: Record<string, number> = {};
+  const avgDimensionRatings: Record<string, number | undefined> = {};
   const dimensionKeys = [
     'technicalCorrectness',
     'contextualRelevance',
@@ -313,13 +328,18 @@ export const ResearchDashboard: React.FC<ResearchDashboardProps> = ({
   ];
 
   dimensionKeys.forEach(k => {
-    const sum = reviews.reduce((acc, r) => acc + (r.ratings?.[k as keyof typeof r.ratings] || 0), 0);
-    avgDimensionRatings[k] = totalReviews > 0 ? Number((sum / totalReviews).toFixed(2)) : 5.0;
+    const ratings = reviews
+      .map(r => r.ratings?.[k as keyof typeof r.ratings])
+      .filter((rating): rating is number => typeof rating === 'number' && Number.isFinite(rating));
+    avgDimensionRatings[k] = ratings.length > 0
+      ? Number((ratings.reduce((sum, rating) => sum + rating, 0) / ratings.length).toFixed(2))
+      : undefined;
   });
 
-  const overallMean = totalReviews > 0
-    ? (Object.values(avgDimensionRatings).reduce((a, b) => a + b, 0) / dimensionKeys.length).toFixed(2)
-    : '5.00';
+  const ratedDimensions = Object.values(avgDimensionRatings).filter((rating): rating is number => rating !== undefined);
+  const overallMean = ratedDimensions.length > 0
+    ? (ratedDimensions.reduce((sum, rating) => sum + rating, 0) / ratedDimensions.length).toFixed(2)
+    : undefined;
 
   // Critical Failure Counts (10 Version 5 Categories)
   const criticalFailureCounts: Record<string, number> = {
@@ -334,6 +354,7 @@ export const ResearchDashboard: React.FC<ResearchDashboardProps> = ({
     application_crash_or_task_state_corruption: 0,
     unreconstructable_missing_or_mislinked_records: 0
   };
+  const criticalFailureReviewCount = reviews.filter(r => r.criticalFailures !== undefined).length;
 
   reviews.forEach(r => {
     if (r.criticalFailures) {
@@ -342,6 +363,8 @@ export const ResearchDashboard: React.FC<ResearchDashboardProps> = ({
       });
     }
   });
+  const overallKappa = agreementReport?.quadraticWeightedKappa?.overall?.kappa;
+  const claimConfusionMatrix = agreementReport?.confusionMatrixClaim || agreementReport?.confusionMatrix?.claim;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 overflow-y-auto">
@@ -352,7 +375,7 @@ export const ResearchDashboard: React.FC<ResearchDashboardProps> = ({
             <BarChart3 className="text-red-500" size={22} />
             <h2 className="text-lg font-bold text-white">Research Evaluation & Defect Dashboard</h2>
             <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 font-mono">
-              v1.0.0 (Baseline Freeze)
+              v1.0.0 (NOT READY FOR COLLECTION)
             </span>
             {activeRun && (
               <span className="flex items-center gap-1 text-xs bg-red-950/60 border border-red-800/50 text-red-300 px-2 py-0.5 rounded font-mono">
@@ -390,14 +413,16 @@ export const ResearchDashboard: React.FC<ResearchDashboardProps> = ({
               <BarChart3 size={13} />
               Section J Report
             </button>
-            <button
-              onClick={handleCleanupNonFormal}
-              className="px-2.5 py-1 text-xs text-red-400 hover:text-red-300 bg-red-950/30 border border-red-900/50 rounded flex items-center gap-1"
-              title="Purge non-formal synthetic/pilot data"
-            >
-              <Trash2 size={13} />
-              Purge Non-Formal Data
-            </button>
+            {isAdmin && (
+              <button
+                onClick={handleCleanupNonFormal}
+                className="px-2.5 py-1 text-xs text-red-400 hover:text-red-300 bg-red-950/30 border border-red-900/50 rounded flex items-center gap-1"
+                title="Purge non-formal synthetic/pilot data"
+              >
+                <Trash2 size={13} />
+                Purge Non-Formal Data
+              </button>
+            )}
             <button onClick={onClose} className="text-slate-400 hover:text-white">
               <X size={20} />
             </button>
@@ -414,7 +439,7 @@ export const ResearchDashboard: React.FC<ResearchDashboardProps> = ({
                 : 'Application Capability Evaluation Mode (Stage 1 — Researcher/Evaluator Only): '}
             </span>
             {governance?.policyStatement ||
-              'Pilot records are retained and reported as formative evidence but are excluded from the applicable formal analysis dataset unless the approved protocol explicitly states otherwise.'}
+              'This build is not approved for participant recruitment or formal research data collection.'}
           </div>
         </div>
 
@@ -429,7 +454,7 @@ export const ResearchDashboard: React.FC<ResearchDashboardProps> = ({
                   <h3 className="text-sm font-bold text-white flex items-center gap-2">
                     Research Freeze & Lock Workflow
                     <span className="px-2 py-0.5 rounded text-[11px] font-mono bg-emerald-950 border border-emerald-700 text-emerald-300">
-                      State: {governance?.currentState || 'DRAFT'}
+                      State: {governance?.currentState || 'UNAVAILABLE'}
                     </span>
                     <span className="px-2 py-0.5 rounded text-[11px] font-mono bg-blue-950 border border-blue-700 text-blue-300">
                       Mode: {governance?.researchMode || 'capability_evaluation'}
@@ -463,7 +488,7 @@ export const ResearchDashboard: React.FC<ResearchDashboardProps> = ({
                   className="px-3 py-1.5 text-xs bg-indigo-950/80 hover:bg-indigo-900 border border-indigo-700 text-indigo-200 rounded font-medium flex items-center gap-1.5"
                 >
                   <ShieldCheck size={14} />
-                  Run 23-Point Freeze Preflight
+                  Run 24-Point Freeze Preflight
                 </button>
                 <select
                   value={targetFreezeState}
@@ -486,14 +511,18 @@ export const ResearchDashboard: React.FC<ResearchDashboardProps> = ({
                 <button
                   type="button"
                   onClick={handleTransitionState}
-                  className="px-3 py-1.5 text-xs bg-emerald-700 hover:bg-emerald-600 text-white rounded font-semibold"
+                  disabled
+                  title="Research-governance state transitions are not implemented."
+                  className="px-3 py-1.5 text-xs bg-slate-700 text-slate-400 rounded font-semibold cursor-not-allowed"
                 >
                   Apply State
                 </button>
                 <button
                   type="button"
                   onClick={() => setUnlockModalOpen(true)}
-                  className="px-3 py-1.5 text-xs bg-amber-950/70 hover:bg-amber-900 border border-amber-700 text-amber-200 rounded flex items-center gap-1"
+                  disabled
+                  title="Governance unlock and deviation recording are not implemented."
+                  className="px-3 py-1.5 text-xs bg-slate-800 border border-slate-700 text-slate-500 rounded flex items-center gap-1 cursor-not-allowed"
                 >
                   <Unlock size={13} />
                   Unlock / Deviation
@@ -609,22 +638,32 @@ export const ResearchDashboard: React.FC<ResearchDashboardProps> = ({
             </div>
             <div className="p-4 bg-slate-950 rounded-lg border border-slate-800">
               <span className="text-[11px] text-slate-400 block font-medium">Rubric Mean Rating</span>
-              <span className="text-2xl font-bold text-amber-400 mt-1 block">{overallMean} / 5.0</span>
+              <span className="text-2xl font-bold text-amber-400 mt-1 block">
+                {overallMean === undefined ? 'N/A' : `${overallMean} / 5.0`}
+              </span>
               <span className="text-[10px] text-slate-500">Across 9 faculty dimensions</span>
             </div>
             <div className="p-4 bg-slate-950 rounded-lg border border-slate-800">
               <span className="text-[11px] text-slate-400 block font-medium">Evaluation Pass Rate</span>
-              <span className={`text-2xl font-bold mt-1 block ${Number(passRate) >= 80 ? 'text-green-400' : 'text-red-400'}`}>
-                {passRate}%
+              <span className={`text-2xl font-bold mt-1 block ${
+                passRate === undefined ? 'text-slate-400' : Number(passRate) >= 80 ? 'text-green-400' : 'text-red-400'
+              }`}>
+                {passRate === undefined ? 'N/A' : `${passRate}%`}
               </span>
-              <span className="text-[10px] text-slate-500">Zero critical failures</span>
+              <span className="text-[10px] text-slate-500">
+                {totalReviews === 0 ? 'No evaluations recorded' : 'Based on recorded evaluations'}
+              </span>
             </div>
             <div className="p-4 bg-slate-950 rounded-lg border border-slate-800">
               <span className="text-[11px] text-slate-400 block font-medium">Guardrail Compliance</span>
               <span className="text-2xl font-bold text-blue-400 mt-1 block">
-                {avgDimensionRatings['guardrailCompliance']?.toFixed(1) || '5.0'} / 5.0
+                {avgDimensionRatings['guardrailCompliance'] === undefined
+                  ? 'N/A'
+                  : `${avgDimensionRatings['guardrailCompliance'].toFixed(1)} / 5.0`}
               </span>
-              <span className="text-[10px] text-slate-500">Zero flag disclosures</span>
+              <span className="text-[10px] text-slate-500">
+                {avgDimensionRatings['guardrailCompliance'] === undefined ? 'No rating recorded' : 'Faculty rubric rating'}
+              </span>
             </div>
             <div className="p-4 bg-slate-950 rounded-lg border border-slate-800">
               <span className="text-[11px] text-slate-400 block font-medium">Active Defect Count</span>
@@ -645,19 +684,19 @@ export const ResearchDashboard: React.FC<ResearchDashboardProps> = ({
               </h3>
               <div className="space-y-2 pt-1">
                 {dimensionKeys.map(dim => {
-                  const val = avgDimensionRatings[dim] || 5.0;
-                  const pct = (val / 5.0) * 100;
+                  const val = avgDimensionRatings[dim];
+                  const pct = val === undefined ? 0 : (val / 5.0) * 100;
                   const prettyName = dim.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase());
                   return (
                     <div key={dim} className="space-y-1">
                       <div className="flex justify-between text-xs">
                         <span className="text-slate-300">{prettyName}</span>
-                        <span className="font-bold text-amber-400">{val.toFixed(2)}</span>
+                        <span className="font-bold text-amber-400">{val === undefined ? 'N/A' : val.toFixed(2)}</span>
                       </div>
                       <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
                         <div
                           className={`h-full rounded-full ${
-                            val >= 4.0 ? 'bg-amber-400' : val >= 3.0 ? 'bg-yellow-500' : 'bg-red-500'
+                            val === undefined ? 'bg-slate-700' : val >= 4.0 ? 'bg-amber-400' : val >= 3.0 ? 'bg-yellow-500' : 'bg-red-500'
                           }`}
                           style={{ width: `${pct}%` }}
                         />
@@ -681,7 +720,9 @@ export const ResearchDashboard: React.FC<ResearchDashboardProps> = ({
                     <div
                       key={key}
                       className={`flex justify-between items-center p-2 rounded text-xs ${
-                        count > 0 ? 'bg-red-950/40 border border-red-900/50' : 'bg-slate-900 border border-slate-800'
+                        count > 0
+                          ? 'bg-red-950/40 border border-red-900/50'
+                          : 'bg-slate-900 border border-slate-800'
                       }`}
                     >
                       <span className={count > 0 ? 'text-red-300 font-medium' : 'text-slate-400'}>
@@ -692,7 +733,7 @@ export const ResearchDashboard: React.FC<ResearchDashboardProps> = ({
                           count > 0 ? 'bg-red-600 text-white' : 'bg-slate-800 text-slate-500'
                         }`}
                       >
-                        {count}
+                        {criticalFailureReviewCount === totalReviews && totalReviews > 0 ? count : 'N/A'}
                       </span>
                     </div>
                   );
@@ -710,13 +751,15 @@ export const ResearchDashboard: React.FC<ResearchDashboardProps> = ({
                   CEW Agreement & Quadratic Weighted Cohen's Kappa (&kappa;<sub>w</sub>)
                 </h3>
                 <span className={`text-xs px-2.5 py-0.5 rounded-full font-medium border ${
-                  (agreementReport.quadraticWeightedKappa?.overall?.kappa ?? 1.0) >= 0.70
+                  overallKappa === undefined
+                    ? 'bg-slate-900 border-slate-700 text-slate-400'
+                    : overallKappa >= 0.70
                     ? 'bg-emerald-950/60 border-emerald-800/60 text-emerald-300'
-                    : (agreementReport.quadraticWeightedKappa?.overall?.kappa ?? 1.0) >= 0.40
+                    : overallKappa >= 0.40
                     ? 'bg-amber-950/60 border-amber-800/60 text-amber-300'
                     : 'bg-red-950/60 border-red-800/60 text-red-300'
                 }`}>
-                  Overall &kappa;<sub>w</sub>: {agreementReport.quadraticWeightedKappa?.overall?.kappa?.toFixed(3) ?? '1.000'} ({agreementReport.quadraticWeightedKappa?.overall?.interpretation ?? 'Substantial'})
+                  Overall &kappa;<sub>w</sub>: {overallKappa?.toFixed(3) ?? 'N/A'} ({agreementReport.quadraticWeightedKappa?.overall?.interpretation ?? 'Unavailable'})
                 </span>
               </div>
 
@@ -726,42 +769,42 @@ export const ResearchDashboard: React.FC<ResearchDashboardProps> = ({
                   <span className="text-slate-400 block mb-0.5 text-[11px]">Overall &kappa;<sub>w</sub> (Pooled)</span>
                   <div className="flex items-baseline gap-2">
                     <span className="text-xl font-bold text-blue-300">
-                      {agreementReport.quadraticWeightedKappa?.overall?.kappa?.toFixed(3) ?? '1.000'}
+                      {overallKappa?.toFixed(3) ?? 'N/A'}
                     </span>
-                    <span className="text-[10px] text-emerald-400 font-medium">Target &ge;0.70</span>
+                    <span className="text-[10px] text-slate-400 font-medium">Target &ge;0.70</span>
                   </div>
                   <span className="text-[10px] text-slate-400 block mt-1">
-                    P<sub>o</sub>: {agreementReport.quadraticWeightedKappa?.overall?.observedWeightedAgreement?.toFixed(3) ?? '1.000'} | P<sub>e</sub>: {agreementReport.quadraticWeightedKappa?.overall?.chanceExpectedAgreement?.toFixed(3) ?? '0.333'}
+                    P<sub>o</sub>: {agreementReport.quadraticWeightedKappa?.overall?.observedWeightedAgreement?.toFixed(3) ?? 'N/A'} | P<sub>e</sub>: {agreementReport.quadraticWeightedKappa?.overall?.chanceExpectedAgreement?.toFixed(3) ?? 'N/A'}
                   </span>
                 </div>
 
                 <div className="p-3 bg-slate-900 rounded border border-slate-800">
                   <span className="text-slate-400 block mb-0.5 text-[11px]">Claim &kappa;<sub>w</sub></span>
                   <span className="text-xl font-bold text-slate-100">
-                    {agreementReport.quadraticWeightedKappa?.claim?.kappa?.toFixed(3) ?? '1.000'}
+                    {agreementReport.quadraticWeightedKappa?.claim?.kappa?.toFixed(3) ?? 'N/A'}
                   </span>
                   <span className="text-[10px] text-slate-500 block mt-1">
-                    Exact: {agreementReport.claimAgreementPct?.toFixed(1) ?? '100.0'}%
+                    Exact: {agreementReport.claimAgreementPct?.toFixed(1) ?? 'N/A'}{agreementReport.claimAgreementPct === undefined ? '' : '%'}
                   </span>
                 </div>
 
                 <div className="p-3 bg-slate-900 rounded border border-slate-800">
                   <span className="text-slate-400 block mb-0.5 text-[11px]">Evidence &kappa;<sub>w</sub></span>
                   <span className="text-xl font-bold text-slate-100">
-                    {agreementReport.quadraticWeightedKappa?.evidence?.kappa?.toFixed(3) ?? '1.000'}
+                    {agreementReport.quadraticWeightedKappa?.evidence?.kappa?.toFixed(3) ?? 'N/A'}
                   </span>
                   <span className="text-[10px] text-slate-500 block mt-1">
-                    Exact: {agreementReport.evidenceAgreementPct?.toFixed(1) ?? '100.0'}%
+                    Exact: {agreementReport.evidenceAgreementPct?.toFixed(1) ?? 'N/A'}{agreementReport.evidenceAgreementPct === undefined ? '' : '%'}
                   </span>
                 </div>
 
                 <div className="p-3 bg-slate-900 rounded border border-slate-800">
                   <span className="text-slate-400 block mb-0.5 text-[11px]">Warrant &kappa;<sub>w</sub></span>
                   <span className="text-xl font-bold text-slate-100">
-                    {agreementReport.quadraticWeightedKappa?.warrant?.kappa?.toFixed(3) ?? '1.000'}
+                    {agreementReport.quadraticWeightedKappa?.warrant?.kappa?.toFixed(3) ?? 'N/A'}
                   </span>
                   <span className="text-[10px] text-slate-500 block mt-1">
-                    Exact: {agreementReport.warrantAgreementPct?.toFixed(1) ?? '100.0'}%
+                    Exact: {agreementReport.warrantAgreementPct?.toFixed(1) ?? 'N/A'}{agreementReport.warrantAgreementPct === undefined ? '' : '%'}
                   </span>
                 </div>
               </div>
@@ -788,7 +831,7 @@ export const ResearchDashboard: React.FC<ResearchDashboardProps> = ({
                         </td>
                         {[1, 2, 3].map(colVal => {
                           const isDiagonal = rowVal === colVal;
-                          const cellVal = (agreementReport.confusionMatrixClaim || agreementReport.confusionMatrix?.claim)?.[rowVal - 1]?.[colVal - 1] || 0;
+                          const cellVal = claimConfusionMatrix?.[rowVal - 1]?.[colVal - 1];
                           return (
                             <td
                               key={colVal}
@@ -796,7 +839,7 @@ export const ResearchDashboard: React.FC<ResearchDashboardProps> = ({
                                 isDiagonal ? 'bg-blue-950/40 text-blue-300 font-bold' : 'text-slate-400'
                               }`}
                             >
-                              {cellVal}
+                              {cellVal ?? 'N/A'}
                             </td>
                           );
                         })}
@@ -812,7 +855,7 @@ export const ResearchDashboard: React.FC<ResearchDashboardProps> = ({
                   <div>
                     <h4 className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
                       <FileCheck2 size={14} className="text-amber-400" />
-                      RQ5: 30 Researcher-Authored Benchmark CEW Submissions
+                      RQ5: Researcher-Authored Benchmark CEW Submissions
                     </h4>
                     <p className="text-[11px] text-slate-400">
                       Blinded evaluation protocol: automated scores remain strictly hidden until manual 1-3 ratings are submitted.

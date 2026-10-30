@@ -1,6 +1,7 @@
 
 import { Level } from '../types';
 import { LEVELS as DEFAULT_LEVELS } from '../constants';
+import { authService } from './authService';
 
 const STORAGE_KEY = 'socratic_shell_levels_v5_8tasks';
 const EIGHT_CANONICAL_LEVELS = DEFAULT_LEVELS.filter(l => l.id >= 1 && l.id <= 8);
@@ -31,7 +32,7 @@ export const levelService = {
 
   // Sync to server silently
   syncToServer: (levels: Level[]) => {
-      fetch('/api/levels', {
+      authService.fetchAuthenticated('/api/levels', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify(levels)

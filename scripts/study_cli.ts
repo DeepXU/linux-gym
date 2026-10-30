@@ -46,8 +46,16 @@ export async function runStudyBackup(): Promise<{
   const dbBackupPath = path.join(backupDir, 'research_lab.json');
   fs.copyFileSync(dbPath, dbBackupPath);
   const checksum = sha256File(dbBackupPath);
+  const telemetryPath = path.join(process.cwd(), 'data', 'telemetry_events_append_only.jsonl');
+  const telemetryBackupPath = path.join(backupDir, 'telemetry_events_append_only.jsonl');
+  const telemetryExists = fs.existsSync(telemetryPath);
+  if (telemetryExists) fs.copyFileSync(telemetryPath, telemetryBackupPath);
+  const telemetryChecksum = telemetryExists ? sha256File(telemetryBackupPath) : undefined;
+  const events = db.getTelemetryEvents();
 
-  const sumsContent = `${checksum}  research_lab.json\n`;
+  const sumsContent =
+    `${checksum}  research_lab.json\n` +
+    (telemetryChecksum ? `${telemetryChecksum}  telemetry_events_append_only.jsonl\n` : '');
   fs.writeFileSync(path.join(backupDir, 'SHA256SUMS.txt'), sumsContent, 'utf8');
 
   const manifest = {
@@ -55,10 +63,11 @@ export async function runStudyBackup(): Promise<{
     protocolVersion: PROTOCOL_VERSION,
     sourceFile: 'data/research_lab.json',
     sha256: checksum,
+    telemetrySha256: telemetryChecksum,
     recordCounts: {
-      executions: db.getCaseExecutions().length,
-      interactions: db.getInteractions().length,
-      telemetryEvents: db.getTelemetryEvents().length,
+      executions: new Set(events.map(event => event.details?.executionId).filter(Boolean)).size,
+      interactions: new Set(events.map(event => event.interactionId).filter(Boolean)).size,
+      telemetryEvents: events.length,
       reviews: db.getExpertReviews().length
     }
   };
@@ -108,6 +117,18 @@ export async function runStudyReset(explicitConfirm?: string): Promise<{
       `Active formal run "${activeRun.runId}" is currently locked. Unlock it first or pass --force-unlock.`
     );
   }
+  const readiness = await runCollectionReadinessCheck();
+  if (!readiness.readyForFormalCollection) {
+    const blockers = readiness.checks
+      .filter(check => check.status !== 'PASS')
+      .map(check => `${check.id}: ${check.detail}`)
+      .join(' ');
+    throw new Error(`Formal collection reset blocked: ${blockers}`);
+  }
+
+  if (activeRun?.isLocked && forceUnlock) {
+    await db.saveFormalRun({ ...activeRun, isLocked: false });
+  }
 
   // 1. Create verified backup first
   const backup = await runStudyBackup();
@@ -152,7 +173,8 @@ export async function runStudyReset(explicitConfirm?: string): Promise<{
     systemPromptDigest: digests.systemPromptDigest,
     tasksCount: db.getTasks().length,
     standardizedCasesCount: db.getTestCases().length,
-    sequesteredCasesCount: db.getSequesteredCases().length,
+    sequesteredCasesCount: 0,
+    sequesteredCaseWorkflowImplemented: false,
     generatedRecordsCleared: true
   };
 
@@ -338,20 +360,39 @@ export async function runCollectionReadinessCheck(): Promise<{
       sandboxImageBuilt = false;
     }
   }
+  const smokeResults = sandboxHealth.dockerAvailable && sandboxImageBuilt
+    ? SandboxProvider.runAllEightTaskSmokeTestsTwice(true)
+    : [];
+  const smokeTestsPassed =
+    smokeResults.length === 8 &&
+    smokeResults.every(result =>
+      result.verifiedWithRealDocker &&
+      result.executionBackend === 'docker_container' &&
+      result.overallPassed &&
+      result.leakedContainers.length === 0
+    );
   checks.push({
     id: 'CHK-05',
     name: `Docker Daemon & ${SandboxProvider.DEFAULT_DOCKER_IMAGE} Image`,
     category: 'live_infrastructure',
-    status: sandboxHealth.dockerAvailable && sandboxImageBuilt ? 'PASS' : 'NOT VERIFIED',
+    status: smokeTestsPassed ? 'PASS' : 'NOT VERIFIED',
     detail:
-      sandboxHealth.dockerAvailable && sandboxImageBuilt
-        ? `Docker daemon is active and ${SandboxProvider.DEFAULT_DOCKER_IMAGE} is built.`
-        : `Docker daemon or ${SandboxProvider.DEFAULT_DOCKER_IMAGE} not running in current host environment (profile: ${sandboxHealth.profile}). Must be verified on target Ubuntu VM before formal collection.`
+      smokeTestsPassed
+        ? `Docker daemon and ${SandboxProvider.DEFAULT_DOCKER_IMAGE} are available; all eight tasks passed two fresh-container runs with no leaks.`
+        : `Docker/image availability or real-Docker smoke verification failed (profile: ${sandboxHealth.profile}). ${smokeResults.map(result => result.evidenceSummary).filter(summary => !summary.includes('two fresh Docker containers passed')).join(' ')}`
   });
 
   // Check 6: Live Local Ollama Endpoint & Tutor Model Availability (Live Infrastructure)
-  const ollamaUrl = process.env.OLLAMA_BASE_URL || db.getConfig()?.ollamaUrl || DEFAULT_OLLAMA_URL;
-  const targetTutorModel = process.env.OLLAMA_MODEL || db.getConfig()?.ollamaModel || DEFAULT_TUTOR_MODEL;
+  const config = db.getConfig();
+  const configuredOllamaUrl = process.env.OLLAMA_BASE_URL || config?.ollamaUrl || DEFAULT_OLLAMA_URL;
+  const ollamaUrl = configuredOllamaUrl
+    .replace(/\/api\/chat\/?$/i, '')
+    .replace(/\/api\/?$/i, '')
+    .replace(/\/+$/, '');
+  const targetTutorModel = process.env.OLLAMA_MODEL ||
+    (config?.provider === 'ollama' ? config.ollamaModel || config.tutorModel : config?.tutorModel) ||
+    DEFAULT_TUTOR_MODEL;
+  const targetGuardModel = config?.llamaGuardModel || DEFAULT_GUARD_MODEL;
   let ollamaReachable = false;
   let installedModels: string[] = [];
   try {
@@ -367,29 +408,44 @@ export async function runCollectionReadinessCheck(): Promise<{
   } catch {
     ollamaReachable = false;
   }
+  const tutorModelInstalled = installedModels.some(model => model.toLowerCase() === targetTutorModel.toLowerCase());
+  const guardModelInstalled = installedModels.some(model => model.toLowerCase() === targetGuardModel.toLowerCase());
+  const localModelStackReady =
+    config?.provider === 'ollama' &&
+    ollamaReachable &&
+    tutorModelInstalled &&
+    guardModelInstalled;
   checks.push({
     id: 'CHK-06',
-    name: `Live Local Ollama Reachability (${ollamaUrl})`,
+    name: `Live Local Ollama Models (${ollamaUrl})`,
     category: 'live_infrastructure',
-    status: ollamaReachable ? 'PASS' : 'NOT VERIFIED',
-    detail: ollamaReachable
-      ? `Ollama reachable at ${ollamaUrl}. Models found: ${installedModels.join(', ') || 'none'}.`
-      : `Ollama service at ${ollamaUrl} is not reachable in this container. Must be verified on target Ubuntu VM before formal collection.`
+    status: localModelStackReady ? 'PASS' : 'NOT VERIFIED',
+    detail: localModelStackReady
+      ? `Ollama is reachable and both configured models are installed (tutor: ${targetTutorModel}; guard: ${targetGuardModel}).`
+      : `Local model stack is not verified. provider=${config?.provider || 'unset'}, reachable=${ollamaReachable}, tutorInstalled=${tutorModelInstalled}, guardInstalled=${guardModelInstalled}.`
   });
 
   // Check 7: Clean Dataset State (Zero unarchived development records contaminating formal run)
-  const devExecutions = db
-    .getCaseExecutions()
-    .filter(e => e.data_classification === 'dev_smoke' || e.data_classification === 'DEVELOPMENT_TEST');
+  const devExecutions = db.getTelemetryEvents().filter(
+    event => event.dataClassification === 'dev_smoke' || event.dataClassification === 'DEVELOPMENT_TEST'
+  );
   checks.push({
     id: 'CHK-07',
     name: 'Dataset Cleanliness & Classification Separation',
     category: 'automated_offline',
-    status: 'PASS',
+    status: devExecutions.length === 0 ? 'PASS' : 'FAIL',
     detail:
       devExecutions.length === 0
-        ? 'Database contains 0 development test executions.'
-        : `${devExecutions.length} development executions are tagged as dev_smoke/DEVELOPMENT_TEST and excluded from formal exports. Run 'npm run study:reset -- --confirm "START NEW COLLECTION"' before formal collection.`
+        ? 'Database contains 0 development telemetry events.'
+        : `${devExecutions.length} development telemetry events remain; archive/reset them before any collection.`
+  });
+
+  checks.push({
+    id: 'CHK-08',
+    name: 'Ground-truth verification and sequestered-case release workflows',
+    category: 'automated_offline',
+    status: 'FAIL',
+    detail: 'These workflows are not implemented in this build; the API explicitly returns HTTP 501.',
   });
 
   const allPassed = checks.every(c => c.status === 'PASS');
@@ -430,7 +486,7 @@ export async function runCollectionReadinessCheck(): Promise<{
     '# 1. Build the isolated Ubuntu 24.04 sandbox image',
     'docker build -t linux-tutor-sandbox:latest -f Dockerfile.sandbox .',
     '',
-    '# 2. Ensure Ollama is running on 127.0.0.1:11434 and models are pulled',
+    '# 2. Ensure Ollama is running on 127.0.0.1:2004 and models are pulled',
     'ollama list',
     '# Optional: pull dedicated safety classifier if using Llama Guard 3',
     'ollama pull llama-guard3:1b',
